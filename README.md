@@ -106,8 +106,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr};
+use iroh::protocol::Router;
 use iroh_sdht::{
-    derive_node_id, Contact, DhtNode, IrohNetwork, DHT_ALPN,
+    derive_node_id, Contact, DhtNode, DhtProtocolHandler, IrohNetwork, DHT_ALPN,
 };
 
 #[tokio::main]
@@ -135,19 +136,27 @@ async fn main() -> Result<()> {
     // 5. Create a DHT node (k = 20, alpha = 3 are reasonable starting values).
     let dht = Arc::new(DhtNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3));
 
-    // 6. TODO: run server loop for incoming connections.
-    //    See the example binary in src/main.rs and the `server` module:
-    //
-    //    - accept connections using iroh Router
-    //    - call `handle_connection` with `DhtProtocolHandler`
-    //
-    // 7. TODO: perform puts/gets using `dht.put` / `dht.get`.
+    // 6. Spin up the Router accept loop, mirroring the iroh echo example.
+    let _router = Router::builder(endpoint.clone())
+        .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
+        .spawn();
+
+    // 7. Perform puts/gets using `dht.put` / `dht.get`.
 
     Ok(())
 }
 ```
 
-For a complete runnable example with server loop and telemetry, see the example binary in this repository (`src/main.rs`).
+The `Router::accept` call wires [`DhtProtocolHandler`] in as the entry point for
+every QUIC connection that negotiates `DHT_ALPN`, matching the "start accept
+side" pattern documented in the iroh echo example.  On the client side,
+[`IrohNetwork`] opens a connection, exchanges a single framed JSON-RPC request on
+a bi-directional stream, and then closes the connection after reading the
+response, honoring the echo example's "the side that last reads should close"
+guidance.
+
+For a complete runnable example with server loop and telemetry, see the example
+binary in this repository (`src/main.rs`).
 
 ### Chatroom example
 

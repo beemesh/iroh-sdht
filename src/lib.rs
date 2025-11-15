@@ -17,7 +17,7 @@
 //! - [`framing`]: helpers for length-prefixed frames so RPCs can be multiplexed
 //!   over a single stream.
 //! - [`server`]: utilities for hosting an RPC server on top of the network
-//!   transport.
+//!   transport using iroh's [`Router`] and [`ProtocolHandler`].
 //!
 //! ## Getting started
 //!
@@ -49,9 +49,25 @@
 //! # }
 //! ```
 //!
-//! The binary in `src/main.rs` demonstrates how to wire these pieces together to
-//! run a self-contained DHT node that discovers peers via mDNS with relay
-//! fallback.
+//! The binary in `src/main.rs` demonstrates how to wire these pieces together:
+//!
+//! - The iroh [`Endpoint`] is configured with [`DHT_ALPN`] via
+//!   `Endpoint::builder().alpns(...)`, matching the echo example's
+//!   `start_accept_side` guidance.
+//! - [`Router::builder`] installs [`DhtProtocolHandler`] as the accept-side entry
+//!   point for every QUIC connection that selects `DHT_ALPN`.
+//! - [`IrohNetwork`] opens a connection per outbound RPC, exchanges a single
+//!   framed JSON-RPC on a bi-directional stream, and closes the connection after
+//!   reading the response so the peer observes a graceful shutdown.
+//! - The server side calls [`handle_connection`] for each inbound connection and
+//!   mirrors the echo example's "request, respond, allow the reader to close"
+//!   lifecycle.
+//!
+//! This example node discovers peers via mDNS with relay fallback.
+//!
+//! [`Router`]: iroh::protocol::Router
+//! [`ProtocolHandler`]: iroh::protocol::ProtocolHandler
+//! [`Endpoint`]: iroh::Endpoint
 
 pub mod core;
 pub mod framing;

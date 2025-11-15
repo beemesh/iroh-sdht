@@ -21,6 +21,11 @@ impl IrohNetwork {
 
     async fn call_rpc(&self, to: &Contact, rpc: Rpc) -> Result<Rpc> {
         let addr = self.parse_addr(to)?;
+        // For the moment we create a fresh QUIC connection per RPC.  This keeps the
+        // implementation very close to the iroh echo example: a single
+        // request/response exchange per connection and bi-directional stream.  A
+        // future optimisation could pool long-lived connections per peer, but that
+        // would require connection-liveness tracking inside [`DhtNetwork`].
         let conn = self.endpoint.connect(addr, DHT_ALPN).await?;
         let (mut send, mut recv) = conn.open_bi().await?;
 
@@ -30,6 +35,15 @@ impl IrohNetwork {
 
         if let Some(resp_bytes) = read_frame(&mut recv).await? {
             let resp: Rpc = serde_json::from_slice(&resp_bytes)?;
+
+            // Per the echo example's guidance, "the side that last reads should
+            // close" so that graceful shutdown propagates.  The client performs the
+            // final read in this RPC flow, so we explicitly close the connection
+            // once we have decoded the response.  Waiting for `closed()` allows the
+            // peer to observe the close cleanly before we drop the handle.
+            conn.close(0u32.into(), b"dht-rpc-complete");
+            let _ = conn.closed().await;
+
             Ok(resp)
         } else {
             Err(anyhow!("no response frame"))
