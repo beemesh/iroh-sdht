@@ -21,6 +21,8 @@ fn endpoint_id_to_node_id(endpoint: &Endpoint) -> NodeId {
 #[tokio::main]
 async fn main() -> Result<()> {
     let endpoint = Endpoint::builder()
+        // Match the echo example by configuring our custom ALPN up front.  Any
+        // peer selecting `DHT_ALPN` will be routed to `DhtProtocolHandler` below.
         .alpns(vec![DHT_ALPN.to_vec()])
         .relay_mode(RelayMode::Default)
         .bind()
@@ -58,6 +60,9 @@ async fn main() -> Result<()> {
         ALPHA,
     ));
 
+    // Mirrors the `start_accept_side` snippet from the echo example: register a
+    // protocol handler for the DHT ALPN so every incoming connection is handed to
+    // `handle_connection`.
     let _router = Router::builder(endpoint.clone())
         .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
         .spawn();

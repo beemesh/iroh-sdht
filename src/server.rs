@@ -10,11 +10,20 @@ use crate::core::{DhtNetwork, DhtNode};
 use crate::framing::{read_frame, write_frame};
 use crate::protocol::{Rpc, RpcKind};
 
+/// Handles a single incoming connection for the DHT ALPN.
+///
+/// The router invokes this for every connection whose peer selected [`crate::net::DHT_ALPN`].
+/// Much like the iroh echo example we limit the connection lifetime to a single
+/// request/response exchange for now.  Supporting multiple bi-directional
+/// streams per connection would require extra state management; a TODO below
+/// documents that future enhancement.
 pub async fn handle_connection<N: DhtNetwork>(
     node: Arc<DhtNode<N>>,
     conn: Connection,
 ) -> Result<()> {
-    // Accept a single bi-directional stream for simplicity.
+    // Accept a single bi-directional stream for simplicity.  This mirrors the
+    // echo example's shape; adding a loop here would allow multiple RPCs per
+    // connection once the RPC framing grows a notion of session.
     let (mut send, mut recv): (SendStream, RecvStream) = conn.accept_bi().await?;
     let maybe_bytes = read_frame(&mut recv).await?;
     if maybe_bytes.is_none() {
@@ -50,7 +59,9 @@ pub async fn handle_connection<N: DhtNetwork>(
             RpcKind::Pong
         }
         RpcKind::Nodes { .. } | RpcKind::Value { .. } => {
-            // These should not arrive unsolicited in this simple design.
+            // These are responses in our RPC vocabulary and should never arrive
+            // as unsolicited requests.  We respond with a simple Pong so the
+            // peer learns we are alive without leaking routing information.
             RpcKind::Pong
         }
     };
@@ -63,10 +74,21 @@ pub async fn handle_connection<N: DhtNetwork>(
     let reply_bytes = serde_json::to_vec(&reply)?;
     write_frame(&mut send, &reply_bytes).await?;
     send.finish()?;
+    // We intentionally do not close the connection from the server side.  The
+    // client performs the final read of the response frame, so following the
+    // echo example's guidance it is responsible for closing the connection.  Our
+    // handler simply finishes the stream and returns, which drops the
+    // connection/stream handles.
     Ok(())
 }
 
 #[derive(Clone)]
+/// The router entry point for inbound `DHT_ALPN` connections.
+///
+/// `Router::builder(endpoint.clone()).accept(DHT_ALPN, DhtProtocolHandler::new(...))` mirrors
+/// the iroh echo example's `start_accept_side`: for each QUIC connection negotiated
+/// with our ALPN the router invokes [`ProtocolHandler::accept`], which in turn
+/// delegates to [`handle_connection`].
 pub struct DhtProtocolHandler<N: DhtNetwork> {
     node: Arc<DhtNode<N>>,
 }
@@ -90,6 +112,9 @@ impl<N: DhtNetwork> ProtocolHandler for DhtProtocolHandler<N> {
     ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
         let node = self.node.clone();
         async move {
+            // Every incoming connection for `DHT_ALPN` is handed to
+            // `handle_connection`.  Any error from the handler is wrapped as an
+            // `AcceptError` so the router can tear the connection down cleanly.
             handle_connection(node, connection)
                 .await
                 .map_err(|err| AcceptError::from_err(io::Error::new(io::ErrorKind::Other, err)))
