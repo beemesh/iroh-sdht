@@ -12,12 +12,12 @@ use tokio::time::{Duration, Instant};
 pub type NodeId = [u8; 32];
 pub type Key = [u8; 32];
 
-const CLUSTER_RECOMPUTE_INTERVAL: Duration = Duration::from_secs(300);
+const TIERING_RECOMPUTE_INTERVAL: Duration = Duration::from_secs(300);
 const MAX_RTT_SAMPLES_PER_NODE: usize = 32;
-const MIN_LATENCY_CLUSTERS: usize = 1;
-const MAX_LATENCY_CLUSTERS: usize = 6;
+const MIN_LATENCY_TIERS: usize = 1;
+const MAX_LATENCY_TIERS: usize = 6;
 const KMEANS_ITERATIONS: usize = 20;
-const CLUSTER_PENALTY_FACTOR: f32 = 1.5;
+const TIERING_PENALTY_FACTOR: f32 = 1.5;
 const PRESSURE_DISK_SOFT_LIMIT: usize = 8 * 1024 * 1024; // 8 MiB approx disk budget
 const PRESSURE_MEMORY_SOFT_LIMIT: usize = 4 * 1024 * 1024; // 4 MiB approx memory budget
 const PRESSURE_REQUEST_WINDOW: Duration = Duration::from_secs(60);
@@ -72,9 +72,9 @@ fn distance_cmp(a: &[u8; 32], b: &[u8; 32]) -> std::cmp::Ordering {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ClusterLevel(usize);
+pub struct TieringLevel(usize);
 
-impl ClusterLevel {
+impl TieringLevel {
     fn new(index: usize) -> Self {
         Self(index)
     }
@@ -85,33 +85,33 @@ impl ClusterLevel {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ClusterStats {
+pub struct TieringStats {
     pub centroids: Vec<f32>,
     pub counts: Vec<usize>,
 }
 
-struct ClusterManager {
-    assignments: HashMap<NodeId, ClusterLevel>,
+struct TieringManager {
+    assignments: HashMap<NodeId, TieringLevel>,
     samples: HashMap<NodeId, VecDeque<f32>>,
     centroids: Vec<f32>,
     last_recompute: Instant,
-    min_clusters: usize,
-    max_clusters: usize,
+    min_tiers: usize,
+    max_tiers: usize,
 }
 
-impl ClusterManager {
+impl TieringManager {
     fn new() -> Self {
         Self {
             assignments: HashMap::new(),
             samples: HashMap::new(),
             centroids: vec![150.0],
-            last_recompute: Instant::now() - CLUSTER_RECOMPUTE_INTERVAL,
-            min_clusters: MIN_LATENCY_CLUSTERS,
-            max_clusters: MAX_LATENCY_CLUSTERS,
+            last_recompute: Instant::now() - TIERING_RECOMPUTE_INTERVAL,
+            min_tiers: MIN_LATENCY_TIERS,
+            max_tiers: MAX_LATENCY_TIERS,
         }
     }
 
-    fn register_contact(&mut self, node: &NodeId) -> ClusterLevel {
+    fn register_contact(&mut self, node: &NodeId) -> TieringLevel {
         let default = self.default_level();
         *self.assignments.entry(*node).or_insert(default)
     }
@@ -129,14 +129,14 @@ impl ClusterManager {
         self.recompute_if_needed();
     }
 
-    fn level_for(&self, node: &NodeId) -> ClusterLevel {
+    fn level_for(&self, node: &NodeId) -> TieringLevel {
         self.assignments
             .get(node)
             .copied()
             .unwrap_or_else(|| self.default_level())
     }
 
-    fn stats(&self) -> ClusterStats {
+    fn stats(&self) -> TieringStats {
         let mut counts = vec![0usize; self.centroids.len()];
         for level in self.assignments.values() {
             let idx = level.index();
@@ -144,7 +144,7 @@ impl ClusterManager {
                 counts[idx] += 1;
             }
         }
-        ClusterStats {
+        TieringStats {
             centroids: self.centroids.clone(),
             counts,
         }
@@ -152,7 +152,7 @@ impl ClusterManager {
 
     fn recompute_if_needed(&mut self) {
         let now = Instant::now();
-        if now.duration_since(self.last_recompute) < CLUSTER_RECOMPUTE_INTERVAL {
+        if now.duration_since(self.last_recompute) < TIERING_RECOMPUTE_INTERVAL {
             return;
         }
 
@@ -170,19 +170,18 @@ impl ClusterManager {
             })
             .collect();
 
-        if per_node.len() < self.min_clusters {
+        if per_node.len() < self.min_tiers {
             self.last_recompute = now;
             return;
         }
 
-        let max_k = per_node.len().min(self.max_clusters);
+        let max_k = per_node.len().min(self.max_tiers);
         let samples: Vec<f32> = per_node.iter().map(|(_, avg)| *avg).collect();
 
-        let (centroids, assignments) = dynamic_kmeans(&samples, self.min_clusters, max_k);
+        let (centroids, assignments) = dynamic_kmeans(&samples, self.min_tiers, max_k);
 
-        for ((node, _avg), cluster_idx) in per_node.iter().zip(assignments.iter()) {
-            self.assignments
-                .insert(*node, ClusterLevel::new(*cluster_idx));
+        for ((node, _avg), tier_idx) in per_node.iter().zip(assignments.iter()) {
+            self.assignments.insert(*node, TieringLevel::new(*tier_idx));
         }
 
         if !centroids.is_empty() {
@@ -191,29 +190,29 @@ impl ClusterManager {
         self.last_recompute = now;
     }
 
-    fn default_level(&self) -> ClusterLevel {
+    fn default_level(&self) -> TieringLevel {
         if self.centroids.is_empty() {
-            return ClusterLevel::new(0);
+            return TieringLevel::new(0);
         }
-        ClusterLevel::new(self.centroids.len() / 2)
+        TieringLevel::new(self.centroids.len() / 2)
     }
 
-    fn fastest_level(&self) -> ClusterLevel {
-        ClusterLevel::new(0)
+    fn fastest_level(&self) -> TieringLevel {
+        TieringLevel::new(0)
     }
 
-    fn slowest_level(&self) -> ClusterLevel {
+    fn slowest_level(&self) -> TieringLevel {
         if self.centroids.is_empty() {
-            ClusterLevel::new(0)
+            TieringLevel::new(0)
         } else {
-            ClusterLevel::new(self.centroids.len() - 1)
+            TieringLevel::new(self.centroids.len() - 1)
         }
     }
 
-    fn next_level(&self, level: ClusterLevel) -> Option<ClusterLevel> {
+    fn next_level(&self, level: TieringLevel) -> Option<TieringLevel> {
         let next_idx = level.index() + 1;
         if next_idx < self.centroids.len() {
-            Some(ClusterLevel::new(next_idx))
+            Some(TieringLevel::new(next_idx))
         } else {
             None
         }
@@ -235,7 +234,7 @@ fn dynamic_kmeans(samples: &[f32], min_k: usize, max_k: usize) -> (Vec<f32>, Vec
     for k in min_k..=max_k {
         let (centroids, assignments, inertia) = run_kmeans(samples, k);
 
-        let penalty = (k as f32) * (samples.len() as f32).ln().max(1.0) * CLUSTER_PENALTY_FACTOR;
+        let penalty = (k as f32) * (samples.len() as f32).ln().max(1.0) * TIERING_PENALTY_FACTOR;
         let score = inertia + penalty;
 
         if score < best_score {
@@ -278,8 +277,8 @@ fn run_kmeans(samples: &[f32], k: usize) -> (Vec<f32>, Vec<usize>, f32) {
         }
     }
 
-    // Reinitialize empty clusters if any
-    ensure_cluster_coverage(samples, &mut centroids, &mut assignments);
+    // Reinitialize empty tiers if any
+    ensure_tier_coverage(samples, &mut centroids, &mut assignments);
 
     // Compute inertia and sort centroids to enforce ordering from fastest to slowest.
     let mut inertia = 0.0f32;
@@ -306,7 +305,7 @@ fn run_kmeans(samples: &[f32], k: usize) -> (Vec<f32>, Vec<usize>, f32) {
     (sorted_centroids, sorted_assignments, inertia)
 }
 
-fn ensure_cluster_coverage(samples: &[f32], centroids: &mut [f32], assignments: &mut [usize]) {
+fn ensure_tier_coverage(samples: &[f32], centroids: &mut [f32], assignments: &mut [usize]) {
     let k = centroids.len();
     let mut counts = vec![0usize; k];
     for idx in assignments.iter() {
@@ -320,11 +319,11 @@ fn ensure_cluster_coverage(samples: &[f32], centroids: &mut [f32], assignments: 
     let mut sorted_samples: Vec<f32> = samples.to_vec();
     sorted_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    for (cluster_idx, count) in counts.iter_mut().enumerate() {
+    for (tier_idx, count) in counts.iter_mut().enumerate() {
         if *count == 0 {
-            let pos = ((cluster_idx as f32 + 0.5) / k as f32 * (sorted_samples.len() - 1) as f32)
+            let pos = ((tier_idx as f32 + 0.5) / k as f32 * (sorted_samples.len() - 1) as f32)
                 .round() as usize;
-            centroids[cluster_idx] = sorted_samples[pos];
+            centroids[tier_idx] = sorted_samples[pos];
         }
     }
 
@@ -619,7 +618,7 @@ impl LevelHistory {
 
 #[allow(dead_code)]
 struct QueryEscalation {
-    levels: HashMap<ClusterLevel, LevelHistory>,
+    levels: HashMap<TieringLevel, LevelHistory>,
     window: usize,
 }
 
@@ -632,7 +631,7 @@ impl QueryEscalation {
         }
     }
 
-    fn record(&mut self, level: ClusterLevel, success: bool) -> f32 {
+    fn record(&mut self, level: TieringLevel, success: bool) -> f32 {
         let history = self
             .levels
             .entry(level)
@@ -640,7 +639,7 @@ impl QueryEscalation {
         history.record(success)
     }
 
-    fn miss_rate(&self, level: ClusterLevel) -> f32 {
+    fn miss_rate(&self, level: TieringLevel) -> f32 {
         self.levels
             .get(&level)
             .map(|history| history.miss_rate())
@@ -650,8 +649,8 @@ impl QueryEscalation {
 
 #[derive(Clone, Debug, Default)]
 pub struct TelemetrySnapshot {
-    pub cluster_centroids: Vec<f32>,
-    pub cluster_counts: Vec<usize>,
+    pub tier_centroids: Vec<f32>,
+    pub tier_counts: Vec<usize>,
     pub pressure: f32,
     pub stored_keys: usize,
     pub replication_factor: usize,
@@ -813,7 +812,7 @@ pub struct DhtNode<N: DhtNetwork> {
     store: Arc<Mutex<LocalStore>>,
     network: Arc<N>,
     params: Arc<Mutex<AdaptiveParams>>,
-    cluster: Arc<Mutex<ClusterManager>>,
+    tiering: Arc<Mutex<TieringManager>>,
     #[allow(dead_code)]
     escalation: Arc<Mutex<QueryEscalation>>,
 }
@@ -827,15 +826,15 @@ impl<N: DhtNetwork> DhtNode<N> {
             store: Arc::new(Mutex::new(LocalStore::new())),
             network: Arc::new(network),
             params: Arc::new(Mutex::new(AdaptiveParams::new(k, alpha))),
-            cluster: Arc::new(Mutex::new(ClusterManager::new())),
+            tiering: Arc::new(Mutex::new(TieringManager::new())),
             escalation: Arc::new(Mutex::new(QueryEscalation::new(QUERY_STATS_WINDOW))),
         }
     }
 
     pub async fn observe_contact(&self, contact: Contact) {
         {
-            let mut cluster = self.cluster.lock().await;
-            cluster.register_contact(&contact.id);
+            let mut tiering = self.tiering.lock().await;
+            tiering.register_contact(&contact.id);
         }
         let k = {
             let params = self.params.lock().await;
@@ -904,10 +903,10 @@ impl<N: DhtNetwork> DhtNode<N> {
         self.store_local(key, value).await;
     }
 
-    async fn level_matches(&self, node: &NodeId, level_filter: Option<ClusterLevel>) -> bool {
+    async fn level_matches(&self, node: &NodeId, level_filter: Option<TieringLevel>) -> bool {
         if let Some(level) = level_filter {
-            let cluster = self.cluster.lock().await;
-            cluster.level_for(node) == level
+            let tiering = self.tiering.lock().await;
+            tiering.level_for(node) == level
         } else {
             true
         }
@@ -916,23 +915,23 @@ impl<N: DhtNetwork> DhtNode<N> {
     async fn filter_contacts(
         &self,
         contacts: Vec<Contact>,
-        level_filter: Option<ClusterLevel>,
+        level_filter: Option<TieringLevel>,
     ) -> Vec<Contact> {
         if level_filter.is_none() {
             return contacts;
         }
         let level = level_filter.unwrap();
-        let cluster = self.cluster.lock().await;
+        let tiering = self.tiering.lock().await;
         contacts
             .into_iter()
-            .filter(|c| cluster.level_for(&c.id) == level)
+            .filter(|c| tiering.level_for(&c.id) == level)
             .collect()
     }
 
     async fn record_rtt(&self, contact: &Contact, elapsed: Duration) {
         let rtt_ms = (elapsed.as_secs_f64() * 1000.0) as f32;
-        let mut cluster = self.cluster.lock().await;
-        cluster.record_sample(&contact.id, rtt_ms);
+        let mut tiering = self.tiering.lock().await;
+        tiering.record_sample(&contact.id, rtt_ms);
     }
 
     async fn adjust_k(&self, success: bool) {
@@ -965,7 +964,7 @@ impl<N: DhtNetwork> DhtNode<N> {
     async fn iterative_find_node_with_level(
         &self,
         target: NodeId,
-        level_filter: Option<ClusterLevel>,
+        level_filter: Option<TieringLevel>,
     ) -> Result<Vec<Contact>> {
         let mut seen: HashSet<NodeId> = HashSet::new();
         let mut queried: HashSet<NodeId> = HashSet::new();
@@ -1071,7 +1070,7 @@ impl<N: DhtNetwork> DhtNode<N> {
     async fn iterative_find_value_with_level(
         &self,
         key: Key,
-        level_filter: Option<ClusterLevel>,
+        level_filter: Option<TieringLevel>,
     ) -> Result<(Option<Vec<u8>>, Vec<Contact>)> {
         if let Some(v) = self.get_local(&key).await {
             return Ok((Some(v), Vec::new()));
@@ -1190,8 +1189,8 @@ impl<N: DhtNetwork> DhtNode<N> {
         }
 
         let target_level = {
-            let cluster = self.cluster.lock().await;
-            cluster.slowest_level()
+            let tiering = self.tiering.lock().await;
+            tiering.slowest_level()
         };
 
         for (key, value) in spilled {
@@ -1200,7 +1199,7 @@ impl<N: DhtNetwork> DhtNode<N> {
         }
     }
 
-    async fn replicate_to_level(&self, key: Key, value: Vec<u8>, level: ClusterLevel) {
+    async fn replicate_to_level(&self, key: Key, value: Vec<u8>, level: TieringLevel) {
         let target: NodeId = key;
         if let Ok(contacts) = self
             .iterative_find_node_with_level(target, Some(level))
@@ -1262,11 +1261,11 @@ impl<N: DhtNetwork> DhtNode<N> {
         }
 
         let Some(mut current_level) = ({
-            let cluster = self.cluster.lock().await;
-            if cluster.centroids.is_empty() {
+            let tiering = self.tiering.lock().await;
+            if tiering.centroids.is_empty() {
                 None
             } else {
-                Some(cluster.fastest_level())
+                Some(tiering.fastest_level())
             }
         }) else {
             return Ok(None);
@@ -1294,9 +1293,9 @@ impl<N: DhtNetwork> DhtNode<N> {
             }
 
             let next_level = {
-                let cluster = self.cluster.lock().await;
+                let tiering = self.tiering.lock().await;
                 if miss_rate > 0.30 {
-                    cluster.next_level(current_level)
+                    tiering.next_level(current_level)
                 } else {
                     None
                 }
@@ -1315,9 +1314,9 @@ impl<N: DhtNetwork> DhtNode<N> {
     }
 
     pub async fn telemetry_snapshot(&self) -> TelemetrySnapshot {
-        let cluster_stats = {
-            let cluster = self.cluster.lock().await;
-            cluster.stats()
+        let tiering_stats = {
+            let tiering = self.tiering.lock().await;
+            tiering.stats()
         };
         let (pressure, stored_keys) = {
             let store = self.store.lock().await;
@@ -1325,8 +1324,8 @@ impl<N: DhtNetwork> DhtNode<N> {
         };
         let params = self.params.lock().await;
         TelemetrySnapshot {
-            cluster_centroids: cluster_stats.centroids,
-            cluster_counts: cluster_stats.counts,
+            tier_centroids: tiering_stats.centroids,
+            tier_counts: tiering_stats.counts,
             pressure,
             stored_keys,
             replication_factor: params.current_k(),

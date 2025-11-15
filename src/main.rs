@@ -101,11 +101,11 @@ async fn main() -> Result<()> {
             interval.tick().await;
             let snapshot = telemetry_node.telemetry_snapshot().await;
             println!(
-                "Telemetry: pressure={:.2}, stored_keys={}, clusters={:?}, centroids={:?}, k={}, alpha={}",
+                "Telemetry: pressure={:.2}, stored_keys={}, tiers={:?}, centroids={:?}, k={}, alpha={}",
                 snapshot.pressure,
                 snapshot.stored_keys,
-                snapshot.cluster_counts,
-                snapshot.cluster_centroids,
+                snapshot.tier_counts,
+                snapshot.tier_centroids,
                 snapshot.replication_factor,
                 snapshot.concurrency,
             );

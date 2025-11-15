@@ -3,7 +3,7 @@
 //! This crate exposes a lightweight experimental distributed hash table (DHT)
 //! built on top of the [`iroh`](https://crates.io/crates/iroh) transport stack.
 //! The implementation combines a Kademlia-inspired routing table with adaptive
-//! clustering and backpressure controls so that it can be embedded in services
+//! tiering and backpressure controls so that it can be embedded in services
 //! that need a self-healing peer-to-peer key/value store.
 //!
 //! The crate is split into a handful of modules that can be reused
