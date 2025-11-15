@@ -1,6 +1,6 @@
 # Iroh sDHT
 
-A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh’s](https://github.com/n0-computer/iroh) QUIC transport.
+A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh](https://github.com/n0-computer/iroh)’s QUIC transport.
 
 ---
 
@@ -32,31 +32,31 @@ This is intended as a **practical, observable DHT core** you can embed into iroh
 
 ## Features
 
-- Kademlia‑inspired DHT:
+- **Kademlia‑inspired DHT**
   - 32‑byte node IDs and keys derived from BLAKE3.
   - XOR distance and bucketed routing table.
   - Iterative `FIND_NODE` and `FIND_VALUE` lookups.
 
-- Latency‑aware, sloppy sDHT behavior:
+- **Latency‑aware, sloppy sDHT behavior**
   - Per‑peer RTT sampling.
   - Dynamic latency tiers (fast → slow).
   - Query escalation across tiers based on miss rate.
 
-- Adaptive tiering:
+- **Adaptive tiering**
   - Bounded number of tiers (e.g. 1–6).
   - Periodic recomputation via k‑means with a complexity penalty.
   - Telemetry exposing tier centroids and counts.
 
-- Resource‑aware local store:
+- **Resource‑aware local store**
   - LRU‑like eviction under pressure.
   - Soft limits for disk/memory and request rate.
   - Telemetry `pressure` output.
 
-- Adaptive K/α:
+- **Adaptive K/α**
   - `k` (replication factor) responds to churn.
   - `α` (parallelism) responds to lookup success.
 
-- Transport‑agnostic core, plus:
+- **Transport‑agnostic core, plus**
   - `DhtNetwork` trait for custom transports.
   - `IrohNetwork` implementation using `MagicEndpoint`.
 
@@ -84,8 +84,8 @@ Add the dependencies:
 
 ```toml
 [dependencies]
-iroh-sdht = "0.x"    # this crate
-iroh = "0.x"                 # for MagicEndpoint / transport
+iroh-sdht = "0.x"                  # this crate
+iroh = "0.x"                      # for MagicEndpoint / transport
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```
@@ -170,5 +170,3 @@ If you just need a minimal, spec‑like Kademlia for an academic project, a simp
 ## License
 
 Apache‑2.0
-
----
