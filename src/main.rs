@@ -8,10 +8,10 @@ use iroh::net::relay::RelayMode;
 use iroh::net::{MagicEndpoint, NodeAddr};
 use tokio::time::{self, Duration};
 
+use iroh_mdns::MdnsDiscovery;
 use iroh_sdht::{
     derive_node_id, handle_connection, Contact, DhtNode, IrohNetwork, NodeId, DHT_ALPN,
 };
-use iroh_mdns::MdnsDiscovery;
 
 const K: usize = 20; // bucket/replication size
 const ALPHA: usize = 3; // concurrent lookups
