@@ -156,7 +156,7 @@ impl TieringManager {
             return;
         }
 
-        let mut per_node: Vec<(NodeId, f32)> = self
+        let per_node: Vec<(NodeId, f32)> = self
             .samples
             .iter()
             .filter_map(|(node, samples)| {
@@ -517,7 +517,6 @@ struct AdaptiveParams {
     k: usize,
     alpha: usize,
     churn_history: VecDeque<bool>,
-    #[allow(dead_code)]
     query_history: VecDeque<bool>,
 }
 
@@ -541,7 +540,6 @@ impl AdaptiveParams {
         old_k != self.k
     }
 
-    #[allow(dead_code)]
     fn record_query_success(&mut self, success: bool) {
         self.query_history.push_back(success);
         if self.query_history.len() > QUERY_STATS_WINDOW {
@@ -566,7 +564,6 @@ impl AdaptiveParams {
         self.k = new_k as usize;
     }
 
-    #[allow(dead_code)]
     fn update_alpha(&mut self) {
         if self.query_history.is_empty() {
             return;
@@ -593,13 +590,11 @@ impl AdaptiveParams {
     }
 }
 
-#[allow(dead_code)]
 struct LevelHistory {
     history: VecDeque<bool>,
     window: usize,
 }
 
-#[allow(dead_code)]
 impl LevelHistory {
     fn new(window: usize) -> Self {
         Self {
@@ -625,13 +620,11 @@ impl LevelHistory {
     }
 }
 
-#[allow(dead_code)]
 struct QueryEscalation {
     levels: HashMap<TieringLevel, LevelHistory>,
     window: usize,
 }
 
-#[allow(dead_code)]
 impl QueryEscalation {
     fn new(window: usize) -> Self {
         Self {
@@ -648,12 +641,6 @@ impl QueryEscalation {
         history.record(success)
     }
 
-    fn miss_rate(&self, level: TieringLevel) -> f32 {
-        self.levels
-            .get(&level)
-            .map(|history| history.miss_rate())
-            .unwrap_or(0.0)
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -785,7 +772,6 @@ pub trait DhtNetwork: Send + Sync + 'static {
     async fn find_node(&self, to: &Contact, target: NodeId) -> Result<Vec<Contact>>;
 
     /// Return (value, closer_nodes).
-    #[allow(dead_code)]
     async fn find_value(&self, to: &Contact, key: Key) -> Result<(Option<Vec<u8>>, Vec<Contact>)>;
 
     async fn store(&self, to: &Contact, key: Key, value: Vec<u8>) -> Result<()>;
@@ -814,7 +800,6 @@ pub trait DhtNetwork: Send + Sync + 'static {
 /// share it between background tasks such as telemetry collection, incoming
 /// connection handlers and API frontends.
 pub struct DhtNode<N: DhtNetwork> {
-    #[allow(dead_code)]
     pub id: NodeId,
     pub self_contact: Contact,
     routing: Arc<Mutex<RoutingTable>>,
@@ -822,7 +807,6 @@ pub struct DhtNode<N: DhtNetwork> {
     network: Arc<N>,
     params: Arc<Mutex<AdaptiveParams>>,
     tiering: Arc<Mutex<TieringManager>>,
-    #[allow(dead_code)]
     escalation: Arc<Mutex<QueryEscalation>>,
 }
 
@@ -1088,12 +1072,10 @@ impl<N: DhtNetwork> DhtNode<N> {
         Ok(shortlist)
     }
 
-    #[allow(dead_code)]
     pub async fn iterative_find_value(&self, key: Key) -> Result<(Option<Vec<u8>>, Vec<Contact>)> {
         self.iterative_find_value_with_level(key, None).await
     }
 
-    #[allow(dead_code)]
     async fn iterative_find_value_with_level(
         &self,
         key: Key,
@@ -1263,14 +1245,12 @@ impl<N: DhtNetwork> DhtNode<N> {
         }
     }
 
-    #[allow(dead_code)]
     async fn adjust_alpha(&self, success: bool) {
         let mut params = self.params.lock().await;
         params.record_query_success(success);
     }
 
     /// PUT with distance-based replication.
-    #[allow(dead_code)]
     pub async fn put(&self, value: Vec<u8>) -> Result<Key> {
         let key = hash_content(&value);
 
@@ -1288,7 +1268,6 @@ impl<N: DhtNetwork> DhtNode<N> {
     }
 
     /// GET with integrity, escalation, and optional re-replication.
-    #[allow(dead_code)]
     pub async fn get(&self, key: Key) -> Result<Option<Vec<u8>>> {
         if let Some(v) = self.get_local(&key).await {
             self.adjust_alpha(true).await;
@@ -1370,7 +1349,6 @@ impl<N: DhtNetwork> DhtNode<N> {
 }
 
 /// Helper: random NodeId for tests (not used with iroh IDs).
-#[allow(dead_code)]
 pub fn random_node_id() -> NodeId {
     let mut id = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut id);
