@@ -1965,7 +1965,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "iroh_kademlia_dht"
+name = "iroh_sdht"
 version = "0.1.0"
 dependencies = [
  "anyhow",
