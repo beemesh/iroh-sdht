@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use quinn::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 
 use crate::core::{DhtNetwork, DhtNode};
 use crate::framing::{read_frame, write_frame};
@@ -59,6 +59,6 @@ pub async fn handle_connection<N: DhtNetwork>(
 
     let reply_bytes = serde_json::to_vec(&reply)?;
     write_frame(&mut send, &reply_bytes).await?;
-    send.finish().await?;
+    send.finish()?;
     Ok(())
 }

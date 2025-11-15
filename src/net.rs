@@ -1,9 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use quinn::{RecvStream, SendStream};
-
-use iroh::net::MagicEndpoint;
-use iroh::net::NodeAddr;
+use iroh::Endpoint;
+use iroh::EndpointAddr;
 
 use crate::core::{Contact, DhtNetwork, Key, NodeId};
 use crate::framing::{read_frame, write_frame};
@@ -12,23 +10,23 @@ use crate::protocol::{Rpc, RpcKind};
 pub const DHT_ALPN: &[u8] = b"myapp/dht/1";
 
 pub struct IrohNetwork {
-    pub endpoint: MagicEndpoint,
+    pub endpoint: Endpoint,
     pub self_contact: Contact,
 }
 
 impl IrohNetwork {
-    fn parse_addr(&self, contact: &Contact) -> Result<NodeAddr> {
+    fn parse_addr(&self, contact: &Contact) -> Result<EndpointAddr> {
         Ok(serde_json::from_str(&contact.addr)?)
     }
 
     async fn call_rpc(&self, to: &Contact, rpc: Rpc) -> Result<Rpc> {
         let addr = self.parse_addr(to)?;
         let conn = self.endpoint.connect(addr, DHT_ALPN).await?;
-        let (mut send, mut recv): (SendStream, RecvStream) = conn.open_bi().await?;
+        let (mut send, mut recv) = conn.open_bi().await?;
 
         let bytes = serde_json::to_vec(&rpc)?;
         write_frame(&mut send, &bytes).await?;
-        send.finish().await?;
+        send.finish()?;
 
         if let Some(resp_bytes) = read_frame(&mut recv).await? {
             let resp: Rpc = serde_json::from_slice(&resp_bytes)?;

@@ -29,11 +29,11 @@
 //! use std::sync::Arc;
 //!
 //! use anyhow::Result;
-//! use iroh::net::{MagicEndpoint, NodeAddr};
+//! use iroh::{Endpoint, EndpointAddr};
 //! use iroh_sdht::{Contact, DhtNode, IrohNetwork, DHT_ALPN};
 //!
-//! # async fn launch(endpoint: MagicEndpoint, addr: NodeAddr) -> Result<()> {
-//! let self_id = iroh_sdht::derive_node_id(endpoint.node_id().as_bytes());
+//! # async fn launch(endpoint: Endpoint, addr: EndpointAddr) -> Result<()> {
+//! let self_id = iroh_sdht::derive_node_id(endpoint.id().as_bytes());
 //! let self_contact = Contact {
 //!     id: self_id,
 //!     addr: serde_json::to_string(&addr)?,
