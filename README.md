@@ -33,7 +33,7 @@ This is intended as a **practical, observable DHT core** you can embed into iroh
 ## Features
 
 - Kademlia‑inspired DHT:
-  - 256‑bit `NodeId` / `Key`.
+  - 32‑byte node IDs and keys derived from BLAKE3.
   - XOR distance and bucketed routing table.
   - Iterative `FIND_NODE` and `FIND_VALUE` lookups.
 
