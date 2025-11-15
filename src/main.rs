@@ -8,14 +8,16 @@ use iroh::net::relay::RelayMode;
 use iroh::net::{MagicEndpoint, NodeAddr};
 use tokio::time::{self, Duration};
 
-use iroh_kademlia_dht::{handle_connection, Contact, DhtNode, IrohNetwork, NodeId, DHT_ALPN};
+use iroh_kademlia_dht::{
+    derive_node_id, handle_connection, Contact, DhtNode, IrohNetwork, NodeId, DHT_ALPN,
+};
 use iroh_mdns::MdnsDiscovery;
 
 const K: usize = 20; // bucket/replication size
 const ALPHA: usize = 3; // concurrent lookups
 
 fn public_key_to_node_id(pk: PublicKey) -> NodeId {
-    *pk.as_bytes()
+    derive_node_id(pk.as_bytes())
 }
 
 fn endpoint_id_to_node_id(endpoint: &MagicEndpoint) -> NodeId {

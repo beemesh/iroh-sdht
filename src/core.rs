@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use rand::RngCore;
 use iroh_blake3::Hasher;
+use rand::RngCore;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
@@ -25,15 +25,24 @@ const PRESSURE_REQUEST_LIMIT: usize = 200;
 const PRESSURE_THRESHOLD: f32 = 0.75;
 const QUERY_STATS_WINDOW: usize = 100;
 
-/// Content-addressed key: BLAKE3 hash of content bytes.
-pub fn hash_content(data: &[u8]) -> Key {
+fn blake3_digest(data: &[u8]) -> [u8; 32] {
     let mut hasher = Hasher::new();
     hasher.update(data);
     let digest = hasher.finalize();
 
-    let mut key = [0u8; 32];
-    key.copy_from_slice(digest.as_bytes());
-    key
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_bytes());
+    out
+}
+
+/// Derive a stable 32-byte [`NodeId`] by hashing arbitrary input with BLAKE3.
+pub fn derive_node_id(data: &[u8]) -> NodeId {
+    blake3_digest(data)
+}
+
+/// Content-addressed key: BLAKE3 hash of content bytes.
+pub fn hash_content(data: &[u8]) -> Key {
+    blake3_digest(data)
 }
 
 /// Verify that `key` matches `hash_content(value)`.
@@ -1347,7 +1356,10 @@ mod tests {
         assert_eq!(hash_one, hash_two, "hashes of identical data should match");
 
         let different_hash = hash_content(b"goodbye world");
-        assert_ne!(hash_one, different_hash, "hashes of different data should differ");
+        assert_ne!(
+            hash_one, different_hash,
+            "hashes of different data should differ"
+        );
     }
 
     #[test]
@@ -1378,6 +1390,20 @@ mod tests {
             hash_content(data),
             expected_bytes,
             "hash_content should produce the BLAKE3 digest"
+        );
+    }
+
+    #[test]
+    fn derive_node_id_matches_blake3_reference() {
+        let data = b"public key bytes";
+        let expected = iroh_blake3::hash(data);
+        let mut expected_bytes = [0u8; 32];
+        expected_bytes.copy_from_slice(expected.as_bytes());
+
+        assert_eq!(
+            derive_node_id(data),
+            expected_bytes,
+            "derive_node_id should produce the BLAKE3 digest"
         );
     }
 
