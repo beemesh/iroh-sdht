@@ -9,7 +9,7 @@ A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with
 This crate provides a small, self‑contained distributed hash table that combines:
 
 - **Kademlia‑style routing**  
-  256‑bit node IDs and keys, XOR distance, and bucketed routing tables.
+  32‑byte node IDs and keys derived from BLAKE3, XOR distance, and bucketed routing tables.
 
 - **Coral‑style sloppy DHT behavior**  
   Peers are grouped into **latency‑based tiers**, and lookups escalate from fast/near tiers to slower/further ones.
