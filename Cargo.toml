@@ -11,8 +11,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 iroh-blake3 = "1.4"
 rand = "0.8"
-iroh = "0.13"
-iroh-mdns = "0.13"
+iroh = { version = "0.95.1", features = ["discovery-local-network"] }
 hex = "0.4"
 futures = "0.3"
-quinn = "0.10"

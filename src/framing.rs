@@ -1,5 +1,5 @@
 use anyhow::Result;
-use quinn::{RecvStream, SendStream};
+use iroh::endpoint::{RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub async fn write_frame(stream: &mut SendStream, data: &[u8]) -> Result<()> {

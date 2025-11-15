@@ -2,13 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::future;
-use iroh::net::discovery::{ConcurrentDiscovery, Discovery};
-use iroh::net::key::PublicKey;
-use iroh::net::relay::RelayMode;
-use iroh::net::{MagicEndpoint, NodeAddr};
+use iroh::discovery::mdns::MdnsDiscovery;
+use iroh::{Endpoint, EndpointAddr, RelayMode};
 use tokio::time::{self, Duration};
 
-use iroh_mdns::MdnsDiscovery;
 use iroh_sdht::{
     derive_node_id, handle_connection, Contact, DhtNode, IrohNetwork, NodeId, DHT_ALPN,
 };
@@ -16,35 +13,28 @@ use iroh_sdht::{
 const K: usize = 20; // bucket/replication size
 const ALPHA: usize = 3; // concurrent lookups
 
-fn public_key_to_node_id(pk: PublicKey) -> NodeId {
-    derive_node_id(pk.as_bytes())
-}
-
-fn endpoint_id_to_node_id(endpoint: &MagicEndpoint) -> NodeId {
-    public_key_to_node_id(endpoint.node_id())
+fn endpoint_id_to_node_id(endpoint: &Endpoint) -> NodeId {
+    derive_node_id(endpoint.id().as_bytes())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut endpoint_builder = MagicEndpoint::builder()
+    let endpoint = Endpoint::builder()
         .alpns(vec![DHT_ALPN.to_vec()])
-        .relay_mode(RelayMode::Default);
+        .relay_mode(RelayMode::Default)
+        .bind()
+        .await?;
 
-    match build_discovery_service() {
-        Ok(discovery) => {
-            endpoint_builder = endpoint_builder.discovery(discovery);
-            println!("mDNS discovery enabled; will fall back to relay if unavailable");
-        }
-        Err(err) => {
-            eprintln!(
-                "Failed to initialize mDNS discovery ({err:?}); continuing with relay-only mode"
-            );
-        }
+    if let Err(err) = enable_local_mdns(&endpoint) {
+        eprintln!(
+            "Failed to initialize mDNS discovery ({err:?}); continuing with relay-only mode"
+        );
+    } else {
+        println!("mDNS discovery enabled; will fall back to relay if unavailable");
     }
 
-    let endpoint = endpoint_builder.bind(0).await?;
     let node_id = endpoint_id_to_node_id(&endpoint);
-    let endpoint_addr: NodeAddr = endpoint.my_addr().await?;
+    let endpoint_addr: EndpointAddr = endpoint.addr();
 
     let addr_json = serde_json::to_string(&endpoint_addr)?;
     let self_contact = Contact {
@@ -118,10 +108,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_discovery_service() -> anyhow::Result<Box<dyn Discovery>> {
-    let mdns = MdnsDiscovery::new("iroh-kademlia-dht")
+fn enable_local_mdns(endpoint: &Endpoint) -> anyhow::Result<()> {
+    let mdns = MdnsDiscovery::builder()
+        .service_name("iroh-kademlia-dht")
+        .build(endpoint.id())
         .map_err(|err| anyhow::anyhow!("mDNS discovery initialization failed: {err}"))?;
-    let mut discovery = ConcurrentDiscovery::new();
-    discovery.add(mdns);
-    Ok(Box::new(discovery))
+    endpoint.discovery().add(mdns);
+    Ok(())
 }
