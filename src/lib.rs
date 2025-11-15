@@ -33,7 +33,7 @@
 //! use iroh_kademlia_dht::{Contact, DhtNode, IrohNetwork, DHT_ALPN};
 //!
 //! # async fn launch(endpoint: MagicEndpoint, addr: NodeAddr) -> Result<()> {
-//! let self_id = *endpoint.node_id().as_bytes();
+//! let self_id = iroh_kademlia_dht::derive_node_id(endpoint.node_id().as_bytes());
 //! let self_contact = Contact {
 //!     id: self_id,
 //!     addr: serde_json::to_string(&addr)?,
@@ -59,6 +59,8 @@ pub mod net;
 pub mod protocol;
 pub mod server;
 
-pub use core::{hash_content, verify_key_value_pair, Contact, DhtNetwork, DhtNode, Key, NodeId};
+pub use core::{
+    derive_node_id, hash_content, verify_key_value_pair, Contact, DhtNetwork, DhtNode, Key, NodeId,
+};
 pub use net::{IrohNetwork, DHT_ALPN};
 pub use server::handle_connection;
