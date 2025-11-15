@@ -170,8 +170,8 @@ impl TieringManager {
             })
             .collect();
 
-        if per_node.len() < self.min_tiers {
-            self.last_recompute = now;
+        let min_required = self.min_tiers.max(2);
+        if per_node.len() < min_required {
             return;
         }
 
@@ -399,6 +399,10 @@ impl PressureMonitor {
         self.current_bytes = self.current_bytes.saturating_sub(bytes);
     }
 
+    fn record_spill(&mut self) {
+        self.current_pressure = 1.0;
+    }
+
     fn record_request(&mut self) {
         let now = Instant::now();
         self.requests.push_back(now);
@@ -472,16 +476,21 @@ impl LocalStore {
         self.pressure.update_pressure(self.entries.len());
 
         let mut spilled = Vec::new();
+        let mut spill_happened = false;
         while self.pressure.current_pressure() > PRESSURE_THRESHOLD {
             if let Some(evicted_key) = self.order.pop_front() {
                 if let Some(evicted_val) = self.entries.remove(&evicted_key) {
                     self.pressure.record_evict(evicted_val.len());
                     self.pressure.update_pressure(self.entries.len());
                     spilled.push((evicted_key, evicted_val));
+                    spill_happened = true;
                 }
             } else {
                 break;
             }
+        }
+        if spill_happened {
+            self.pressure.record_spill();
         }
         spilled
     }
@@ -832,6 +841,9 @@ impl<N: DhtNetwork> DhtNode<N> {
     }
 
     pub async fn observe_contact(&self, contact: Contact) {
+        if contact.id == self.id {
+            return;
+        }
         {
             let mut tiering = self.tiering.lock().await;
             tiering.register_contact(&contact.id);
@@ -929,6 +941,9 @@ impl<N: DhtNetwork> DhtNode<N> {
     }
 
     async fn record_rtt(&self, contact: &Contact, elapsed: Duration) {
+        if contact.id == self.id {
+            return;
+        }
         let rtt_ms = (elapsed.as_secs_f64() * 1000.0) as f32;
         let mut tiering = self.tiering.lock().await;
         tiering.record_sample(&contact.id, rtt_ms);
@@ -968,6 +983,8 @@ impl<N: DhtNetwork> DhtNode<N> {
     ) -> Result<Vec<Contact>> {
         let mut seen: HashSet<NodeId> = HashSet::new();
         let mut queried: HashSet<NodeId> = HashSet::new();
+        let mut rpc_success = false;
+        let mut rpc_failure = false;
         let k_initial = self.current_k().await;
         let mut shortlist = {
             let rt = self.routing.lock().await;
@@ -1007,12 +1024,16 @@ impl<N: DhtNetwork> DhtNode<N> {
             for contact in candidates {
                 queried.insert(contact.id);
 
+                if contact.id == self.id {
+                    continue;
+                }
+
                 let start = Instant::now();
                 let response = match self.network.find_node(&contact, target).await {
                     Ok(nodes) => {
+                        rpc_success = true;
                         let elapsed = start.elapsed();
                         self.record_rtt(&contact, elapsed).await;
-                        self.adjust_k(true).await;
                         self.observe_contact(contact.clone()).await;
                         for n in &nodes {
                             self.observe_contact(n.clone()).await;
@@ -1020,7 +1041,7 @@ impl<N: DhtNetwork> DhtNode<N> {
                         nodes
                     }
                     Err(_) => {
-                        self.adjust_k(false).await;
+                        rpc_failure = true;
                         continue;
                     }
                 };
@@ -1058,6 +1079,12 @@ impl<N: DhtNetwork> DhtNode<N> {
             }
         }
 
+        if rpc_success {
+            self.adjust_k(true).await;
+        } else if rpc_failure {
+            self.adjust_k(false).await;
+        }
+
         Ok(shortlist)
     }
 
@@ -1079,6 +1106,8 @@ impl<N: DhtNetwork> DhtNode<N> {
         let target: NodeId = key;
         let mut seen: HashSet<NodeId> = HashSet::new();
         let mut queried: HashSet<NodeId> = HashSet::new();
+        let mut rpc_success = false;
+        let mut rpc_failure = false;
 
         let k_initial = self.current_k().await;
         let mut shortlist = {
@@ -1122,14 +1151,14 @@ impl<N: DhtNetwork> DhtNode<N> {
                 let start = Instant::now();
                 let response = match self.network.find_value(&contact, key).await {
                     Ok(result) => {
+                        rpc_success = true;
                         let elapsed = start.elapsed();
                         self.record_rtt(&contact, elapsed).await;
-                        self.adjust_k(true).await;
                         self.observe_contact(contact.clone()).await;
                         result
                     }
                     Err(_) => {
-                        self.adjust_k(false).await;
+                        rpc_failure = true;
                         continue;
                     }
                 };
@@ -1178,6 +1207,12 @@ impl<N: DhtNetwork> DhtNode<N> {
             if !any_closer {
                 break;
             }
+        }
+
+        if rpc_success {
+            self.adjust_k(true).await;
+        } else if rpc_failure {
+            self.adjust_k(false).await;
         }
 
         Ok((None, shortlist))
