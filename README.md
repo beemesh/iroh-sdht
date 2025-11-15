@@ -102,7 +102,7 @@ A typical setup looks like:
 
 ```rust
 use iroh::net::{MagicEndpoint, NodeAddr};
-use iroh_kademlia_dht::{DhtNode, IrohNetwork, Contact, DHT_ALPN};
+use iroh_sdht::{DhtNode, IrohNetwork, Contact, DHT_ALPN};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
