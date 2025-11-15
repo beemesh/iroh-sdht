@@ -1,6 +1,6 @@
 # Iroh sDHT
 
-A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic clustering and backpressure controls, built on [iroh’s](https://github.com/n0-computer/iroh) QUIC transport.
+A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh’s](https://github.com/n0-computer/iroh) QUIC transport.
 
 ---
 
@@ -12,10 +12,10 @@ This crate provides a small, self‑contained distributed hash table that combin
   256‑bit node IDs and keys, XOR distance, and bucketed routing tables.
 
 - **Coral‑style sloppy DHT behavior**  
-  Peers are grouped into **latency‑based clusters**, and lookups escalate from fast/near clusters to slower/further ones.
+  Peers are grouped into **latency‑based tiers**, and lookups escalate from fast/near tiers to slower/further ones.
 
-- **Adaptive dynamic clustering**  
-  Cluster boundaries are learned from observed RTTs using a bounded k‑means variant. The number of latency clusters is chosen dynamically within configured limits.
+- **Adaptive dynamic tiering**  
+  Tier boundaries are learned from observed RTTs using a bounded k‑means variant. The number of latency tiers is chosen dynamically within configured limits.
 
 - **Backpressure‑aware storage**  
   A local key/value store with soft limits on memory/disk and request rate, exposing a `pressure` signal and evicting under load.
@@ -39,13 +39,13 @@ This is intended as a **practical, observable DHT core** you can embed into iroh
 
 - Latency‑aware, sloppy sDHT behavior:
   - Per‑peer RTT sampling.
-  - Dynamic latency clusters (fast → slow).
-  - Query escalation across clusters based on miss rate.
+  - Dynamic latency tiers (fast → slow).
+  - Query escalation across tiers based on miss rate.
 
-- Adaptive clustering:
-  - Bounded number of clusters (e.g. 1–6).
+- Adaptive tiering:
+  - Bounded number of tiers (e.g. 1–6).
   - Periodic recomputation via k‑means with a complexity penalty.
-  - Telemetry exposing cluster centroids and counts.
+  - Telemetry exposing tier centroids and counts.
 
 - Resource‑aware local store:
   - LRU‑like eviction under pressure.
@@ -67,7 +67,7 @@ This is intended as a **practical, observable DHT core** you can embed into iroh
 This library is **production‑leaning**:
 
 - Core algorithms are bounded and observable.
-- Latency clustering, backpressure, and adaptive parameters are designed with real‑world constraints in mind.
+- Latency tiering, backpressure, and adaptive parameters are designed with real‑world constraints in mind.
 - It is suitable for prototypes, internal services, and experimentation with iroh‑based P2P systems.
 
 If you plan a hostile, internet‑wide deployment, you will still want:
@@ -141,14 +141,14 @@ let snapshot = dht.telemetry_snapshot().await;
 
 `TelemetrySnapshot` includes:
 
-- `cluster_centroids: Vec<f32>` – latency cluster centers in ms (fast → slow).
-- `cluster_counts: Vec<usize>` – number of peers in each cluster.
+- `tier_centroids: Vec<f32>` – latency tier centers in ms (fast → slow).
+- `tier_counts: Vec<usize>` – number of peers in each tier.
 - `pressure: f32` – backpressure signal in `[0.0, 1.0]`.
 - `stored_keys: usize` – number of keys in the local store.
 - `replication_factor: usize` – current `k`.
 - `concurrency: usize` – current `alpha`.
 
-This is intended to be wired into your logging/metrics system so you can tune clustering and resource limits in real deployments.
+This is intended to be wired into your logging/metrics system so you can tune tiering and resource limits in real deployments.
 
 ---
 
@@ -159,7 +159,7 @@ Use this library if you:
 - Already use iroh (or want a QUIC‑based, NAT‑friendly transport).
 - Care about **latency‑aware routing**, not just hop count.
 - Want **bounded**, **adaptive** behavior:
-  - dynamic clustering based on RTTs,
+  - dynamic tiering based on RTTs,
   - adaptive `k`/`α`,
   - backpressure and eviction instead of unbounded growth.
 
