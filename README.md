@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     let network = IrohNetwork::new(endpoint);
 
     // 3. Create a DHT node
-    let node_id = iroh_kademlia_dht::random_node_id();
+    let node_id = iroh_sdht::random_node_id();
     let self_contact = Contact::new(node_id, NodeAddr::from_socket_addr(local_addr));
     let dht = DhtNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3);
 
