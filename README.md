@@ -149,6 +149,35 @@ async fn main() -> Result<()> {
 
 For a complete runnable example with server loop and telemetry, see the example binary in this repository (`src/main.rs`).
 
+### Chatroom example
+
+`examples/chatroom.rs` demonstrates how to build a tiny console chat on top of the DHT. Messages are stored via `dht.put`, while peers exchange only the content-addressed keys. When a key arrives, the receiver resolves the payload through the DHT, so the chat automatically reuses the adaptive replication/backpressure logic.
+
+Running two peers locally looks like:
+
+```bash
+# Terminal 1
+cargo run --example chatroom -- --name Alice --room lobby
+
+# Terminal 2 (paste Alice's endpoint JSON printed at startup)
+cargo run --example chatroom -- --name Bob --room lobby --peer '"{... Alice endpoint JSON ...}"'
+```
+
+Each node prints its endpoint address in JSON. Share that string with `/add <json>` and start typing messages. The REPL also supports `/peers` to list known peers and `/quit` to exit.
+
+### Docker
+
+The repository ships with a multi-stage `Dockerfile` that builds the chatroom example into a minimal runtime image:
+
+```bash
+docker build -t iroh-sdht-chat .
+
+# Run with an explicit nickname; add --network host for easy local testing
+docker run -it --rm --network host iroh-sdht-chat --name Alice --room lobby
+```
+
+Share the JSON endpoint printed by one container with another via `--peer` or the `/add` command to link them.
+
 ---
 
 ## Telemetry
