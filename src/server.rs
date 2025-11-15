@@ -1,7 +1,10 @@
+use std::fmt;
+use std::io;
 use std::sync::Arc;
 
 use anyhow::Result;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::protocol::{AcceptError, ProtocolHandler};
 
 use crate::core::{DhtNetwork, DhtNode};
 use crate::framing::{read_frame, write_frame};
@@ -61,4 +64,35 @@ pub async fn handle_connection<N: DhtNetwork>(
     write_frame(&mut send, &reply_bytes).await?;
     send.finish()?;
     Ok(())
+}
+
+#[derive(Clone)]
+pub struct DhtProtocolHandler<N: DhtNetwork> {
+    node: Arc<DhtNode<N>>,
+}
+
+impl<N: DhtNetwork> DhtProtocolHandler<N> {
+    pub fn new(node: Arc<DhtNode<N>>) -> Self {
+        Self { node }
+    }
+}
+
+impl<N: DhtNetwork> fmt::Debug for DhtProtocolHandler<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DhtProtocolHandler").finish()
+    }
+}
+
+impl<N: DhtNetwork> ProtocolHandler for DhtProtocolHandler<N> {
+    fn accept(
+        &self,
+        connection: Connection,
+    ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
+        let node = self.node.clone();
+        async move {
+            handle_connection(node, connection)
+                .await
+                .map_err(|err| AcceptError::from_err(io::Error::new(io::ErrorKind::Other, err)))
+        }
+    }
 }

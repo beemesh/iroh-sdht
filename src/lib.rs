@@ -63,4 +63,4 @@ pub use core::{
     derive_node_id, hash_content, verify_key_value_pair, Contact, DhtNetwork, DhtNode, Key, NodeId,
 };
 pub use net::{IrohNetwork, DHT_ALPN};
-pub use server::handle_connection;
+pub use server::{handle_connection, DhtProtocolHandler};

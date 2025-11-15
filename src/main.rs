@@ -3,11 +3,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures::future;
 use iroh::discovery::mdns::MdnsDiscovery;
+use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode};
 use tokio::time::{self, Duration};
 
 use iroh_sdht::{
-    derive_node_id, handle_connection, Contact, DhtNode, IrohNetwork, NodeId, DHT_ALPN,
+    derive_node_id, Contact, DhtNode, DhtProtocolHandler, IrohNetwork, NodeId, DHT_ALPN,
 };
 
 const K: usize = 20; // bucket/replication size
@@ -26,9 +27,7 @@ async fn main() -> Result<()> {
         .await?;
 
     if let Err(err) = enable_local_mdns(&endpoint) {
-        eprintln!(
-            "Failed to initialize mDNS discovery ({err:?}); continuing with relay-only mode"
-        );
+        eprintln!("Failed to initialize mDNS discovery ({err:?}); continuing with relay-only mode");
     } else {
         println!("mDNS discovery enabled; will fall back to relay if unavailable");
     }
@@ -59,30 +58,9 @@ async fn main() -> Result<()> {
         ALPHA,
     ));
 
-    // Accept incoming connections in background
-    let dht_clone = dht.clone();
-    let endpoint_clone = endpoint.clone();
-
-    tokio::spawn(async move {
-        loop {
-            let Some(connecting) = endpoint_clone.accept().await else {
-                break;
-            };
-            let dht_inner = dht_clone.clone();
-            tokio::spawn(async move {
-                match connecting.await {
-                    Ok(conn) => {
-                        if let Err(e) = handle_connection(dht_inner, conn).await {
-                            eprintln!("connection error: {e:?}");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("connection handshake error: {e:?}");
-                    }
-                }
-            });
-        }
-    });
+    let _router = Router::builder(endpoint.clone())
+        .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
+        .spawn();
 
     let telemetry_node = dht.clone();
     tokio::spawn(async move {
