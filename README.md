@@ -1,6 +1,6 @@
 # Iroh sDHT
 
-A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh](https://github.com/n0-computer/iroh)’s QUIC transport.
+A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh](https://github.com/n0-computer/iroh)’s QUIC transport stack.
 
 ---
 
@@ -24,7 +24,7 @@ This crate provides a small, self‑contained distributed hash table that combin
   Replication factor (`k`) and query concurrency (`α`) adjust based on churn and lookup success.
 
 - **Iroh transport integration**  
-  A ready‑to‑use `IrohNetwork` implementation running over iroh’s QUIC `MagicEndpoint`, with relay and mDNS discovery support.
+  A ready‑to‑use `IrohNetwork` implementation running over iroh’s QUIC `Endpoint`/`EndpointAddr`, with relay and mDNS discovery support in the example binary.
 
 This is intended as a **practical, observable DHT core** you can embed into iroh‑based applications, not just an academic toy.
 
@@ -58,7 +58,7 @@ This is intended as a **practical, observable DHT core** you can embed into iroh
 
 - **Transport‑agnostic core, plus**
   - `DhtNetwork` trait for custom transports.
-  - `IrohNetwork` implementation using `MagicEndpoint`.
+  - `IrohNetwork` implementation using iroh’s `Endpoint`/`EndpointAddr` and `DHT_ALPN`.
 
 ---
 
@@ -85,7 +85,7 @@ Add the dependencies:
 ```toml
 [dependencies]
 iroh-sdht = "0.x"                  # this crate
-iroh = "0.x"                      # for MagicEndpoint / transport
+iroh = "0.x"                       # for Endpoint / QUIC transport
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```
@@ -94,40 +94,60 @@ anyhow = "1"
 
 A typical setup looks like:
 
-1. Create an iroh `MagicEndpoint`.
-2. Wrap it in `IrohNetwork`.
-3. Construct a `DhtNode`.
-4. Run the server loop to handle inbound RPC.
-5. Use the node to `put` / `get` keys.
+1. Create an iroh `Endpoint`.
+2. Build a `Contact` with your node ID and `EndpointAddr`.
+3. Wrap the endpoint in `IrohNetwork`.
+4. Construct a `DhtNode`.
+5. Run the server loop to handle inbound RPC.
+6. Use the node to `put` / `get` keys.
 
 ```rust
-use iroh::net::{MagicEndpoint, NodeAddr};
-use iroh_sdht::{DhtNode, IrohNetwork, Contact, DHT_ALPN};
+use std::sync::Arc;
+
+use anyhow::Result;
+use iroh::{Endpoint, EndpointAddr};
+use iroh_sdht::{
+    derive_node_id, Contact, DhtNode, IrohNetwork, DHT_ALPN,
+};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 1. Build an iroh MagicEndpoint
-    let (endpoint, local_addr) = MagicEndpoint::builder()
-        .alpns(vec![DHT_ALPN.to_vec()])
-        .bind(0)
-        .await?;
+async fn main() -> Result<()> {
+    // 1. Build an iroh Endpoint. See iroh docs for full configuration.
+    let (endpoint, addr): (Endpoint, EndpointAddr) = /* construct or obtain an Endpoint */ {
+        unimplemented!("set up your iroh Endpoint here");
+    };
 
-    // 2. Wrap the endpoint in an IrohNetwork
-    let network = IrohNetwork::new(endpoint);
+    // 2. Derive a stable DHT node ID from the iroh endpoint identity.
+    let node_id = derive_node_id(endpoint.id().as_bytes());
 
-    // 3. Create a DHT node
-    let node_id = iroh_sdht::random_node_id();
-    let self_contact = Contact::new(node_id, NodeAddr::from_socket_addr(local_addr));
-    let dht = DhtNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3);
+    // 3. Build our Contact. We store EndpointAddr as JSON in `addr`.
+    let self_contact = Contact {
+        id: node_id,
+        addr: serde_json::to_string(&addr)?,
+    };
 
-    // 4. TODO: run server loop for incoming connections (see examples)
-    // 5. TODO: perform puts/gets
+    // 4. Wrap the endpoint in an IrohNetwork.
+    let network = IrohNetwork {
+        endpoint,
+        self_contact: self_contact.clone(),
+    };
+
+    // 5. Create a DHT node (k = 20, alpha = 3 are reasonable starting values).
+    let dht = Arc::new(DhtNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3));
+
+    // 6. TODO: run server loop for incoming connections.
+    //    See the example binary in src/main.rs and the `server` module:
+    //
+    //    - accept connections using iroh Router
+    //    - call `handle_connection` with `DhtProtocolHandler`
+    //
+    // 7. TODO: perform puts/gets using `dht.put` / `dht.get`.
 
     Ok(())
 }
 ```
 
-For a complete runnable example with server loop and telemetry, see the example binary in this repository.
+For a complete runnable example with server loop and telemetry, see the example binary in this repository (`src/main.rs`).
 
 ---
 
