@@ -1368,6 +1368,20 @@ mod tests {
     }
 
     #[test]
+    fn hash_content_matches_blake3_reference() {
+        let data = b"hello world";
+        let expected = iroh_blake3::hash(data);
+        let mut expected_bytes = [0u8; 32];
+        expected_bytes.copy_from_slice(expected.as_bytes());
+
+        assert_eq!(
+            hash_content(data),
+            expected_bytes,
+            "hash_content should produce the BLAKE3 digest"
+        );
+    }
+
+    #[test]
     fn xor_distance_produces_expected_value() {
         let mut a = [0u8; 32];
         a[0] = 0b1010_1010;
