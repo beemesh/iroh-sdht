@@ -1,11 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use iroh::Endpoint;
 use iroh::EndpointAddr;
+use irpc::Client;
 
 use crate::core::{Contact, DhtNetwork, Key, NodeId};
-use crate::framing::{read_frame, write_frame};
-use crate::protocol::{Rpc, RpcKind};
+use crate::protocol::{
+    DhtProtocol, FindNodeRequest, FindValueRequest, FindValueResponse, StoreRequest,
+};
 
 pub const DHT_ALPN: &[u8] = b"myapp/dht/1";
 
@@ -19,74 +21,49 @@ impl IrohNetwork {
         Ok(serde_json::from_str(&contact.addr)?)
     }
 
-    async fn call_rpc(&self, to: &Contact, rpc: Rpc) -> Result<Rpc> {
-        let addr = self.parse_addr(to)?;
-        // For the moment we create a fresh QUIC connection per RPC.  This keeps the
-        // implementation very close to the iroh echo example: a single
-        // request/response exchange per connection and bi-directional stream.  A
-        // future optimisation could pool long-lived connections per peer, but that
-        // would require connection-liveness tracking inside [`DhtNetwork`].
-        let conn = self.endpoint.connect(addr, DHT_ALPN).await?;
-        let (mut send, mut recv) = conn.open_bi().await?;
-
-        let bytes = serde_json::to_vec(&rpc)?;
-        write_frame(&mut send, &bytes).await?;
-        send.finish()?;
-
-        if let Some(resp_bytes) = read_frame(&mut recv).await? {
-            let resp: Rpc = serde_json::from_slice(&resp_bytes)?;
-
-            // Per the echo example's guidance, "the side that last reads should
-            // close" so that graceful shutdown propagates.  The client performs the
-            // final read in this RPC flow, so we explicitly close the connection
-            // once we have decoded the response.  Waiting for `closed()` allows the
-            // peer to observe the close cleanly before we drop the handle.
-            conn.close(0u32.into(), b"dht-rpc-complete");
-            let _ = conn.closed().await;
-
-            Ok(resp)
-        } else {
-            Err(anyhow!("no response frame"))
-        }
+    fn client(&self, contact: &Contact) -> Result<Client<DhtProtocol>> {
+        let addr = self.parse_addr(contact)?;
+        Ok(irpc_iroh::client::<DhtProtocol>(
+            self.endpoint.clone(),
+            addr,
+            DHT_ALPN,
+        ))
     }
 }
 
 #[async_trait]
 impl DhtNetwork for IrohNetwork {
     async fn find_node(&self, to: &Contact, target: NodeId) -> Result<Vec<Contact>> {
-        let rpc = Rpc {
-            from: self.self_contact.clone(),
-            kind: RpcKind::FindNode { target },
-        };
-        let resp = self.call_rpc(to, rpc).await?;
-        match resp.kind {
-            RpcKind::Nodes { nodes } => Ok(nodes),
-            _ => Err(anyhow!("unexpected RPC response to FindNode")),
-        }
+        let client = self.client(to)?;
+        let nodes = client
+            .rpc(FindNodeRequest {
+                from: self.self_contact.clone(),
+                target,
+            })
+            .await?;
+        Ok(nodes)
     }
 
     async fn find_value(&self, to: &Contact, key: Key) -> Result<(Option<Vec<u8>>, Vec<Contact>)> {
-        let rpc = Rpc {
-            from: self.self_contact.clone(),
-            kind: RpcKind::FindValue { key },
-        };
-        let resp = self.call_rpc(to, rpc).await?;
-        match resp.kind {
-            RpcKind::Value {
-                key: _k,
-                value,
-                closer,
-            } => Ok((value, closer)),
-            _ => Err(anyhow!("unexpected RPC response to FindValue")),
-        }
+        let client = self.client(to)?;
+        let FindValueResponse { value, closer } = client
+            .rpc(FindValueRequest {
+                from: self.self_contact.clone(),
+                key,
+            })
+            .await?;
+        Ok((value, closer))
     }
 
     async fn store(&self, to: &Contact, key: Key, value: Vec<u8>) -> Result<()> {
-        let rpc = Rpc {
-            from: self.self_contact.clone(),
-            kind: RpcKind::Store { key, value },
-        };
-        let _ = self.call_rpc(to, rpc).await?;
+        let client = self.client(to)?;
+        client
+            .rpc(StoreRequest {
+                from: self.self_contact.clone(),
+                key,
+                value,
+            })
+            .await?;
         Ok(())
     }
 }

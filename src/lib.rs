@@ -13,11 +13,11 @@
 //!   table, local storage engine, and [`DhtNode`] state machine.
 //! - [`net`]: an [`iroh`] based [`DhtNetwork`] implementation that knows how to
 //!   exchange RPC messages over QUIC.
-//! - [`protocol`]: the JSON serialisable wire messages exchanged between peers.
-//! - [`framing`]: helpers for length-prefixed frames so RPCs can be multiplexed
-//!   over a single stream.
+//! - [`protocol`]: the [`irpc`](https://docs.rs/irpc) request/response
+//!   definitions shared by the client and server sides of the DHT RPCs.
 //! - [`server`]: utilities for hosting an RPC server on top of the network
-//!   transport using iroh's [`Router`] and [`ProtocolHandler`].
+//!   transport using `irpc-iroh`'s [`irpc_iroh::IrohProtocol`] and iroh's [`Router`] and
+//!   [`ProtocolHandler`].
 //!
 //! ## Getting started
 //!
@@ -56,12 +56,11 @@
 //!   `start_accept_side` guidance.
 //! - [`Router::builder`] installs [`DhtProtocolHandler`] as the accept-side entry
 //!   point for every QUIC connection that selects `DHT_ALPN`.
-//! - [`IrohNetwork`] opens a connection per outbound RPC, exchanges a single
-//!   framed JSON-RPC on a bi-directional stream, and closes the connection after
-//!   reading the response so the peer observes a graceful shutdown.
-//! - The server side calls [`handle_connection`] for each inbound connection and
-//!   mirrors the echo example's "request, respond, allow the reader to close"
-//!   lifecycle.
+//! - [`IrohNetwork`] uses `irpc-iroh` to lazily create QUIC connections per
+//!   peer and exchange length-prefixed, postcard-encoded messages.
+//! - [`DhtProtocolHandler`] wraps `irpc-iroh`'s [`irpc_iroh::IrohProtocol`] so incoming
+//!   `DHT_ALPN` connections are decoded and dispatched to the [`DhtNode`]
+//!   request handlers.
 //!
 //! This example node discovers peers via mDNS with relay fallback.
 //!
@@ -70,7 +69,6 @@
 //! [`Endpoint`]: iroh::Endpoint
 
 pub mod core;
-pub mod framing;
 pub mod net;
 pub mod protocol;
 pub mod server;
@@ -79,4 +77,11 @@ pub use core::{
     derive_node_id, hash_content, verify_key_value_pair, Contact, DhtNetwork, DhtNode, Key, NodeId,
 };
 pub use net::{IrohNetwork, DHT_ALPN};
-pub use server::{handle_connection, DhtProtocolHandler};
+pub use server::DhtProtocolHandler;
+
+/// Re-export the irpc types used by this crate so applications can compose with
+/// the same versions if desired.
+pub use irpc;
+/// Re-export the irpc-iroh helper to reduce the number of dependencies
+/// applications need to list explicitly.
+pub use irpc_iroh;

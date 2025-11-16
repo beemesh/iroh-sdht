@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
 
     // Mirrors the `start_accept_side` snippet from the echo example: register a
     // protocol handler for the DHT ALPN so every incoming connection is handed to
-    // `handle_connection`.
+    // the irpc-backed server loop.
     let _router = Router::builder(endpoint.clone())
         .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
         .spawn();
