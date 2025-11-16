@@ -1,0 +1,258 @@
+# Iroh sDHT
+
+A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh](https://github.com/n0-computer/iroh)’s QUIC transport stack.
+
+---
+
+## Overview
+
+This crate provides a small, self‑contained distributed hash table that combines:
+
+- **Kademlia‑style routing**  
+  32‑byte node IDs and keys derived from BLAKE3, XOR distance, and bucketed routing tables.
+
+- **Coral‑style sloppy DHT behavior**  
+  Peers are grouped into **latency‑based tiers**, and lookups escalate from fast/near tiers to slower/further ones.
+
+- **Adaptive dynamic tiering**  
+  Tier boundaries are learned from observed RTTs using a bounded k‑means variant. The number of latency tiers is chosen dynamically within configured limits.
+
+- **Backpressure‑aware storage**  
+  A local key/value store with soft limits on memory/disk and request rate, exposing a `pressure` signal and evicting under load.
+
+- **Adaptive parameters**  
+  Replication factor (`k`) and query concurrency (`α`) adjust based on churn and lookup success.
+
+- **Iroh transport integration**  
+  A ready‑to‑use `IrohNetwork` implementation running over iroh’s QUIC `Endpoint`/`EndpointAddr`, with relay and mDNS discovery support in the example binary.
+
+This is intended as a **practical, observable DHT core** you can embed into iroh‑based applications, not just an academic toy.
+
+---
+
+## Features
+
+- **Kademlia‑inspired DHT**
+  - 32‑byte node IDs and keys derived from BLAKE3.
+  - XOR distance and bucketed routing table.
+  - Iterative `FIND_NODE` and `FIND_VALUE` lookups.
+
+- **Latency‑aware, sloppy sDHT behavior**
+  - Per‑peer RTT sampling.
+  - Dynamic latency tiers (fast → slow).
+  - Query escalation across tiers based on miss rate.
+
+- **Adaptive tiering**
+  - Bounded number of tiers (e.g. 1–7).
+  - Periodic recomputation via k‑means with a complexity penalty.
+  - Telemetry exposing tier centroids and counts.
+
+- **Resource‑aware local store**
+  - LRU‑like eviction under pressure.
+  - Soft limits for disk/memory and request rate.
+  - Telemetry `pressure` output.
+
+- **Adaptive K/α**
+  - `k` (replication factor) responds to churn.
+  - `α` (parallelism) responds to lookup success.
+
+- **Transport‑agnostic core, plus**
+  - `DhtNetwork` trait for custom transports.
+  - `IrohNetwork` implementation using iroh’s `Endpoint`/`EndpointAddr` and `DHT_ALPN`.
+
+---
+
+## Status
+
+This library is **production‑leaning**:
+
+- Core algorithms are bounded and observable.
+- Latency tiering, backpressure, and adaptive parameters are designed with real‑world constraints in mind.
+- It is suitable for prototypes, internal services, and experimentation with iroh‑based P2P systems.
+
+If you plan a hostile, internet‑wide deployment, you will still want:
+
+- More testing and fuzzing under churn and adversarial conditions.
+- A security and abuse‑resistance pass.
+- Integration with your metrics/logging stack.
+
+---
+
+## Getting Started
+
+Add the dependencies:
+
+```toml
+[dependencies]
+iroh-sdht = "0.x"                  # this crate
+iroh = "0.x"                       # for Endpoint / QUIC transport
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+```
+
+### Minimal example (outline)
+
+A typical setup looks like:
+
+1. Create an iroh `Endpoint`.
+2. Build a `Contact` with your node ID and `EndpointAddr`.
+3. Wrap the endpoint in `IrohNetwork`.
+4. Construct a `DhtNode`.
+5. Run the server loop to handle inbound RPC.
+6. Use the node to `put` / `get` keys.
+
+```rust
+use std::sync::Arc;
+
+use anyhow::Result;
+use iroh::{Endpoint, EndpointAddr};
+use iroh::protocol::Router;
+use iroh_sdht::{
+    derive_node_id, Contact, DhtNode, DhtProtocolHandler, IrohNetwork, DHT_ALPN,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 1. Build an iroh Endpoint. See iroh docs for full configuration.
+    let (endpoint, addr): (Endpoint, EndpointAddr) = /* construct or obtain an Endpoint */ {
+        unimplemented!("set up your iroh Endpoint here");
+    };
+
+    // 2. Derive a stable DHT node ID from the iroh endpoint identity.
+    let node_id = derive_node_id(endpoint.id().as_bytes());
+
+    // 3. Build our Contact. We store EndpointAddr as JSON in `addr`.
+    let self_contact = Contact {
+        id: node_id,
+        addr: serde_json::to_string(&addr)?,
+    };
+
+    // 4. Wrap the endpoint in an IrohNetwork.
+    let network = IrohNetwork {
+        endpoint,
+        self_contact: self_contact.clone(),
+    };
+
+    // 5. Create a DHT node (k = 20, alpha = 3 are reasonable starting values).
+    let dht = Arc::new(DhtNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3));
+
+    // 6. Spin up the Router accept loop, mirroring the iroh echo example.
+    let _router = Router::builder(endpoint.clone())
+        .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
+        .spawn();
+
+    // 7. Perform puts/gets using `dht.put` / `dht.get`.
+
+    Ok(())
+}
+```
+
+The `Router::accept` call wires [`DhtProtocolHandler`] in as the entry point for
+every QUIC connection that negotiates `DHT_ALPN`, matching the "start accept
+side" pattern documented in the iroh echo example.  On the client side,
+[`IrohNetwork`] opens a connection, exchanges a single framed JSON-RPC request on
+a bi-directional stream, and then closes the connection after reading the
+response, honoring the echo example's "the side that last reads should close"
+guidance.
+
+For a complete runnable example with server loop and telemetry, see the example
+binary in this repository (`src/main.rs`).
+
+### Chatroom example
+
+`examples/chatroom.rs` demonstrates how to build a tiny console chat that **uses the DHT for peer discovery**, but **sends chat messages directly over iroh’s QUIC transport** (via Endpoint::connect using the CHAT_ALPN protocol).
+
+- Each node runs an iroh `Endpoint` that speaks both the DHT protocol (`DHT_ALPN`) and a simple chat protocol (`CHAT_ALPN`).
+- The DHT node is used to discover peers close to a **room‑derived key** (via `iterative_find_node(room_key)`), so peers in the same room can find each other.
+- Actual chat messages are serialized as JSON and sent **directly** to peers over QUIC streams using the chat protocol; messages are **not stored in the DHT**.
+
+Running two peers locally looks like:
+
+```bash
+# Terminal 1
+cargo run --example chatroom -- --name Alice --room lobby
+
+# Terminal 2 (paste Alice's endpoint JSON printed at startup)
+cargo run --example chatroom -- --name Bob --room lobby --peer '"{... Alice endpoint JSON ...}"'
+```
+
+On startup, each node prints something like:
+
+```text
+Chatroom node ready
+  Nickname        : Alice
+  Room            : lobby
+  NodeId (hex)    : <hex node id>
+  Endpoint addr   : {"relay":...,"direct":...}
+Share the endpoint address with peers so they can /add it.
+```
+
+You can then use the small REPL:
+
+- `/add <addr-json>` – add a peer’s `EndpointAddr` (as JSON).
+- `/peers` – list all known peers (from CLI + `/add` + DHT discovery).
+- `/quit` – exit the chat.
+- Any other input line is sent as a chat message to all known peers in the room.
+
+Under the hood:
+
+- Static peers come from `--peer` and `/add`.
+- Dynamic peers are discovered via the DHT with `iterative_find_node(room_discovery_key(room))`, where `room_discovery_key` hashes the room label into a DHT key.
+- For each resolved peer, the example opens a QUIC connection using `CHAT_ALPN`, sends a length‑prefixed JSON `ChatMessage`, and reads a tiny ACK frame.
+
+This keeps the DHT focused on **routing and peer discovery**, while chat traffic itself is handled by a separate, simple application protocol.
+
+### Docker
+
+The repository ships with a multi-stage `Dockerfile` that builds the chatroom example into a minimal runtime image:
+
+```bash
+docker build -t iroh-sdht-chat .
+
+# Run with an explicit nickname; add --network host for easy local testing
+docker run -it --rm --network host iroh-sdht-chat --name Alice --room lobby
+```
+
+Share the JSON endpoint printed by one container with another via `--peer` or the `/add` command to link them.
+
+---
+
+## Telemetry
+
+You can inspect the node’s internal behavior via:
+
+```rust
+let snapshot = dht.telemetry_snapshot().await;
+```
+
+`TelemetrySnapshot` includes:
+
+- `tier_centroids: Vec<f32>` – latency tier centers in ms (fast → slow).
+- `tier_counts: Vec<usize>` – number of peers in each tier.
+- `pressure: f32` – backpressure signal in `[0.0, 1.0]`.
+- `stored_keys: usize` – number of keys in the local store.
+- `replication_factor: usize` – current `k`.
+- `concurrency: usize` – current `alpha`.
+
+This is intended to be wired into your logging/metrics system so you can tune tiering and resource limits in real deployments.
+
+---
+
+## When to use this vs. “plain” Kademlia
+
+Use this library if you:
+
+- Already use iroh (or want a QUIC‑based, NAT‑friendly transport).
+- Care about **latency‑aware routing**, not just hop count.
+- Want **bounded**, **adaptive** behavior:
+  - dynamic tiering based on RTTs,
+  - adaptive `k`/`α`,
+  - backpressure and eviction instead of unbounded growth.
+
+If you just need a minimal, spec‑like Kademlia for an academic project, a simpler Kademlia crate may be enough. This crate targets “small but realistic” DHT deployments.
+
+---
+
+## License
+
+Apache‑2.0
