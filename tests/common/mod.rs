@@ -134,7 +134,7 @@ pub struct TestNode {
 }
 
 impl TestNode {
-    pub async fn new(registry: Arc<NetworkRegistry>, index: u8, k: usize, alpha: usize) -> Self {
+    pub async fn new(registry: Arc<NetworkRegistry>, index: u32, k: usize, alpha: usize) -> Self {
         let contact = make_contact(index);
         let network = TestNetwork::new(registry.clone(), contact.clone());
         let node = DiscoveryNode::new(contact.id, contact.clone(), network.clone(), k, alpha);
@@ -147,13 +147,13 @@ impl TestNode {
     }
 }
 
-pub fn make_node_id(index: u8) -> NodeId {
+pub fn make_node_id(index: u32) -> NodeId {
     let mut id = [0u8; 32];
-    id[0] = index;
+    id[..4].copy_from_slice(&index.to_be_bytes());
     id
 }
 
-pub fn make_contact(index: u8) -> Contact {
+pub fn make_contact(index: u32) -> Contact {
     Contact {
         id: make_node_id(index),
         addr: format!("node-{index}"),
