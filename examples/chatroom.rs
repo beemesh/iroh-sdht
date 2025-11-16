@@ -4,16 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures::StreamExt;
 use iroh::endpoint::{Connection, Endpoint, RelayMode};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::EndpointAddr;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use iroh_sdht::{
-    derive_node_id, hash_content, Contact, DhtNetwork, DhtNode, DhtProtocolHandler, IrohNetwork,
-    Key, DHT_ALPN,
+    derive_node_id, hash_content, Contact, DhtProtocolHandler, DiscoveryNode, IrohNetwork, Key,
+    DHT_ALPN,
 };
 
 const CHAT_ALPN: &[u8] = b"iroh-chatroom/1";
@@ -40,29 +39,19 @@ struct ChatMessage {
     timestamp: u64,
 }
 
-#[derive(Clone)]
-struct ChatProtocolHandler<N: DhtNetwork> {
-    node: Arc<DhtNode<N>>,
-}
+struct ChatProtocolHandler;
 
-impl<N: DhtNetwork> ChatProtocolHandler<N> {
-    fn new(node: Arc<DhtNode<N>>) -> Self {
-        Self { node }
-    }
-}
-
-impl<N: DhtNetwork> fmt::Debug for ChatProtocolHandler<N> {
+impl fmt::Debug for ChatProtocolHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChatProtocolHandler").finish()
     }
 }
 
-impl<N: DhtNetwork> ProtocolHandler for ChatProtocolHandler<N> {
+impl ProtocolHandler for ChatProtocolHandler {
     fn accept(
         &self,
         connection: Connection,
     ) -> impl std::future::Future<Output = Result<(), AcceptError>> + Send {
-        let _node = self.node.clone();
         async move {
             handle_chat_connection(connection).await.map_err(|err| {
                 AcceptError::from_err(std::io::Error::new(std::io::ErrorKind::Other, err))
@@ -129,11 +118,11 @@ async fn main() -> Result<()> {
     };
 
     // DHT is still used for peer discovery, but not for storing chat messages.
-    let dht = Arc::new(DhtNode::new(node_id, self_contact.clone(), network, 20, 3));
+    let dht = DiscoveryNode::new(node_id, self_contact.clone(), network, 20, 3);
 
     let _router = Router::builder(endpoint.clone())
         .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
-        .accept(CHAT_ALPN, ChatProtocolHandler::new(dht.clone()))
+        .accept(CHAT_ALPN, ChatProtocolHandler)
         .spawn();
 
     let peer_addrs = parse_initial_peers(args.peers)?;
@@ -172,7 +161,7 @@ fn room_discovery_key(room: &str) -> Key {
 
 async fn run_repl(
     endpoint: Endpoint,
-    dht: Arc<DhtNode<IrohNetwork>>,
+    dht: DiscoveryNode<IrohNetwork>,
     peers: Arc<Mutex<Vec<EndpointAddr>>>,
     nickname: String,
     room: String,
@@ -259,9 +248,7 @@ async fn run_repl(
 
         // Send the message to every peer directly; no DHT put/get.
         for peer in all_peer_addrs {
-            if let Err(err) =
-                send_chat_message(&endpoint, &peer, &msg_bytes, &self_contact).await
-            {
+            if let Err(err) = send_chat_message(&endpoint, &peer, &msg_bytes, &self_contact).await {
                 eprintln!("Failed to send to peer {peer:?}: {err:?}");
             }
         }

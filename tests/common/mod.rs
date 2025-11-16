@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 
-use iroh_sdht::core::{Contact, DhtNetwork, DhtNode, Key, NodeId};
+use iroh_sdht::{Contact, DhtNetwork, DiscoveryNode, Key, NodeId};
 
 #[derive(Clone)]
 pub struct TestNetwork {
@@ -49,18 +49,18 @@ impl TestNetwork {
 
 #[derive(Default)]
 pub struct NetworkRegistry {
-    peers: RwLock<HashMap<NodeId, Weak<DhtNode<TestNetwork>>>>,
+    peers: RwLock<HashMap<NodeId, DiscoveryNode<TestNetwork>>>,
 }
 
 impl NetworkRegistry {
-    pub async fn register(&self, node: &Arc<DhtNode<TestNetwork>>) {
+    pub async fn register(&self, node: &DiscoveryNode<TestNetwork>) {
         let mut peers = self.peers.write().await;
-        peers.insert(node.self_contact.id, Arc::downgrade(node));
+        peers.insert(node.contact().id, node.clone());
     }
 
-    pub async fn get(&self, id: &NodeId) -> Option<Arc<DhtNode<TestNetwork>>> {
+    pub async fn get(&self, id: &NodeId) -> Option<DiscoveryNode<TestNetwork>> {
         let peers = self.peers.read().await;
-        peers.get(id).and_then(|weak| weak.upgrade())
+        peers.get(id).cloned()
     }
 }
 
@@ -129,7 +129,7 @@ impl TestNetwork {
 }
 
 pub struct TestNode {
-    pub node: Arc<DhtNode<TestNetwork>>,
+    pub node: DiscoveryNode<TestNetwork>,
     pub network: TestNetwork,
 }
 
@@ -137,19 +137,13 @@ impl TestNode {
     pub async fn new(registry: Arc<NetworkRegistry>, index: u8, k: usize, alpha: usize) -> Self {
         let contact = make_contact(index);
         let network = TestNetwork::new(registry.clone(), contact.clone());
-        let node = Arc::new(DhtNode::new(
-            contact.id,
-            contact.clone(),
-            network.clone(),
-            k,
-            alpha,
-        ));
+        let node = DiscoveryNode::new(contact.id, contact.clone(), network.clone(), k, alpha);
         registry.register(&node).await;
         Self { node, network }
     }
 
     pub fn contact(&self) -> Contact {
-        self.node.self_contact.clone()
+        self.node.contact()
     }
 }
 

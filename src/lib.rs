@@ -22,15 +22,15 @@
 //! ## Getting started
 //!
 //! The simplest way to embed the DHT is to construct an [`IrohNetwork`], build a
-//! [`DhtNode`] with the desired replication factor (`k`) and concurrency (`α`),
-//! and then drive the async methods from your application:
+//! [`DiscoveryNode`] with the desired replication factor (`k`) and concurrency
+//! (`α`), and then drive the async methods from your application:
 //!
 //! ```no_run
 //! use std::sync::Arc;
 //!
 //! use anyhow::Result;
 //! use iroh::{Endpoint, EndpointAddr};
-//! use iroh_sdht::{Contact, DhtNode, IrohNetwork, DHT_ALPN};
+//! use iroh_sdht::{Contact, DiscoveryNode, IrohNetwork, DHT_ALPN};
 //!
 //! # async fn launch(endpoint: Endpoint, addr: EndpointAddr) -> Result<()> {
 //! let self_id = iroh_sdht::derive_node_id(endpoint.id().as_bytes());
@@ -42,7 +42,7 @@
 //!     endpoint,
 //!     self_contact: self_contact.clone(),
 //! };
-//! let node = Arc::new(DhtNode::new(self_id, self_contact, network, 20, 3));
+//! let node = DiscoveryNode::new(self_id, self_contact, network, 20, 3);
 //! // The node can now observe peers and perform lookups.
 //! # let _ = node.iterative_find_node(self_id).await?;
 //! # Ok(())
@@ -59,7 +59,7 @@
 //! - [`IrohNetwork`] uses `irpc-iroh` to lazily create QUIC connections per
 //!   peer and exchange length-prefixed, postcard-encoded messages.
 //! - [`DhtProtocolHandler`] wraps `irpc-iroh`'s [`irpc_iroh::IrohProtocol`] so incoming
-//!   `DHT_ALPN` connections are decoded and dispatched to the [`DhtNode`]
+//!   `DHT_ALPN` connections are decoded and dispatched to the [`DiscoveryNode`]
 //!   request handlers.
 //!
 //! This example node discovers peers via mDNS with relay fallback.
@@ -68,13 +68,14 @@
 //! [`ProtocolHandler`]: iroh::protocol::ProtocolHandler
 //! [`Endpoint`]: iroh::Endpoint
 
-pub mod core;
+pub(crate) mod core;
 pub mod net;
 pub mod protocol;
 pub mod server;
 
 pub use core::{
-    derive_node_id, hash_content, verify_key_value_pair, Contact, DhtNetwork, DhtNode, Key, NodeId,
+    derive_node_id, hash_content, verify_key_value_pair, Contact, DhtNetwork, DiscoveryNode, Key,
+    NodeId, RoutingTable,
 };
 pub use net::{IrohNetwork, DHT_ALPN};
 pub use server::DhtProtocolHandler;

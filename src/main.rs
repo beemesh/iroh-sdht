@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use futures::future;
 use iroh::discovery::mdns::MdnsDiscovery;
@@ -8,7 +6,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode};
 use tokio::time::{self, Duration};
 
 use iroh_sdht::{
-    derive_node_id, Contact, DhtNode, DhtProtocolHandler, IrohNetwork, NodeId, DHT_ALPN,
+    derive_node_id, Contact, DhtProtocolHandler, DiscoveryNode, IrohNetwork, NodeId, DHT_ALPN,
 };
 
 const K: usize = 20; // bucket/replication size
@@ -52,13 +50,7 @@ async fn main() -> Result<()> {
         self_contact: self_contact.clone(),
     };
 
-    let dht = Arc::new(DhtNode::new(
-        node_id,
-        self_contact.clone(),
-        network,
-        K,
-        ALPHA,
-    ));
+    let dht = DiscoveryNode::new(node_id, self_contact.clone(), network, K, ALPHA);
 
     // Mirrors the `start_accept_side` snippet from the echo example: register a
     // protocol handler for the DHT ALPN so every incoming connection is handed to
@@ -86,7 +78,8 @@ async fn main() -> Result<()> {
     });
 
     // For now, just park the main task.
-    // In a real app, you'd expose an API (HTTP/CLI/etc.) that calls dht.put() / dht.get().
+    // In a real app, you would expose an API that feeds peer contacts into the
+    // discovery node and consumes lookup results.
     future::pending::<()>().await;
     Ok(())
 }

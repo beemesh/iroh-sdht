@@ -640,7 +640,6 @@ impl QueryEscalation {
             .or_insert_with(|| LevelHistory::new(self.window));
         history.record(success)
     }
-
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1345,6 +1344,73 @@ impl<N: DhtNetwork> DhtNode<N> {
             replication_factor: params.current_k(),
             concurrency: params.current_alpha(),
         }
+    }
+}
+
+/// Public wrapper that restricts the sDHT to peer discovery workflows.
+///
+/// Applications construct a [`DiscoveryNode`] instead of accessing [`DhtNode`]
+/// directly, making it explicit that the exposed API is limited to routing and
+/// lookup functionality.  Storage-oriented APIs (`put`, `get`, etc.) remain
+/// internal to the crate so the sDHT cannot be misused as a general key/value
+/// store.
+pub struct DiscoveryNode<N: DhtNetwork> {
+    inner: Arc<DhtNode<N>>,
+}
+
+impl<N: DhtNetwork> Clone for DiscoveryNode<N> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<N: DhtNetwork> DiscoveryNode<N> {
+    pub fn new(id: NodeId, self_contact: Contact, network: N, k: usize, alpha: usize) -> Self {
+        Self {
+            inner: Arc::new(DhtNode::new(id, self_contact, network, k, alpha)),
+        }
+    }
+
+    pub fn contact(&self) -> Contact {
+        self.inner.self_contact.clone()
+    }
+
+    pub fn node_id(&self) -> NodeId {
+        self.inner.id
+    }
+
+    pub async fn observe_contact(&self, contact: Contact) {
+        self.inner.observe_contact(contact).await;
+    }
+
+    pub async fn iterative_find_node(&self, target: NodeId) -> Result<Vec<Contact>> {
+        self.inner.iterative_find_node(target).await
+    }
+
+    pub async fn telemetry_snapshot(&self) -> TelemetrySnapshot {
+        self.inner.telemetry_snapshot().await
+    }
+
+    pub async fn handle_find_node_request(&self, from: &Contact, target: NodeId) -> Vec<Contact> {
+        self.inner.handle_find_node_request(from, target).await
+    }
+
+    pub async fn handle_find_value_request(
+        &self,
+        from: &Contact,
+        key: Key,
+    ) -> (Option<Vec<u8>>, Vec<Contact>) {
+        self.inner.handle_find_value_request(from, key).await
+    }
+
+    pub async fn handle_store_request(&self, from: &Contact, key: Key, value: Vec<u8>) {
+        self.inner.handle_store_request(from, key, value).await;
+    }
+
+    pub(crate) fn inner(&self) -> Arc<DhtNode<N>> {
+        self.inner.clone()
     }
 }
 

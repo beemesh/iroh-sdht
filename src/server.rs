@@ -7,7 +7,7 @@ use irpc::channel::mpsc;
 use irpc::WithChannels;
 use irpc_iroh::IrohProtocol;
 
-use crate::core::{DhtNetwork, DhtNode};
+use crate::core::{DhtNetwork, DiscoveryNode};
 use crate::protocol::{
     DhtMessage, DhtProtocol, FindNodeRequest, FindValueRequest, FindValueResponse, PingRequest,
     StoreRequest,
@@ -25,7 +25,7 @@ pub struct DhtProtocolHandler {
 }
 
 impl DhtProtocolHandler {
-    pub fn new<N: DhtNetwork>(node: Arc<DhtNode<N>>) -> Self {
+    pub fn new<N: DhtNetwork>(node: DiscoveryNode<N>) -> Self {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(run_server(node, rx));
         let inner = IrohProtocol::with_sender(tx);
@@ -50,23 +50,23 @@ impl ProtocolHandler for DhtProtocolHandler {
     }
 }
 
-async fn run_server<N: DhtNetwork>(node: Arc<DhtNode<N>>, mut inbox: mpsc::Receiver<DhtMessage>) {
+async fn run_server<N: DhtNetwork>(node: DiscoveryNode<N>, mut inbox: mpsc::Receiver<DhtMessage>) {
     while let Ok(Some(msg)) = inbox.recv().await {
         handle_message(node.clone(), msg).await;
     }
 }
 
-async fn handle_message<N: DhtNetwork>(node: Arc<DhtNode<N>>, msg: DhtMessage) {
+async fn handle_message<N: DhtNetwork>(node: DiscoveryNode<N>, msg: DhtMessage) {
     match msg {
-        DhtMessage::FindNode(request) => handle_find_node(node, request).await,
-        DhtMessage::FindValue(request) => handle_find_value(node, request).await,
-        DhtMessage::Store(request) => handle_store(node, request).await,
+        DhtMessage::FindNode(request) => handle_find_node(node.clone(), request).await,
+        DhtMessage::FindValue(request) => handle_find_value(node.clone(), request).await,
+        DhtMessage::Store(request) => handle_store(node.clone(), request).await,
         DhtMessage::Ping(request) => handle_ping(request).await,
     }
 }
 
 async fn handle_find_node<N: DhtNetwork>(
-    node: Arc<DhtNode<N>>,
+    node: DiscoveryNode<N>,
     request: WithChannels<FindNodeRequest, DhtProtocol>,
 ) {
     let WithChannels { inner, tx, .. } = request;
@@ -77,7 +77,7 @@ async fn handle_find_node<N: DhtNetwork>(
 }
 
 async fn handle_find_value<N: DhtNetwork>(
-    node: Arc<DhtNode<N>>,
+    node: DiscoveryNode<N>,
     request: WithChannels<FindValueRequest, DhtProtocol>,
 ) {
     let WithChannels { inner, tx, .. } = request;
@@ -87,7 +87,7 @@ async fn handle_find_value<N: DhtNetwork>(
 }
 
 async fn handle_store<N: DhtNetwork>(
-    node: Arc<DhtNode<N>>,
+    node: DiscoveryNode<N>,
     request: WithChannels<StoreRequest, DhtProtocol>,
 ) {
     let WithChannels { inner, tx, .. } = request;

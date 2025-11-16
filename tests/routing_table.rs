@@ -1,4 +1,4 @@
-use iroh_sdht::core::{Contact, NodeId, RoutingTable};
+use iroh_sdht::{Contact, NodeId, RoutingTable};
 
 fn make_node_id(byte: u8) -> NodeId {
     let mut id = [0u8; 32];

@@ -60,6 +60,11 @@ This is intended as a **practical, observable DHT core** you can embed into iroh
   - `DhtNetwork` trait for custom transports.
   - `IrohNetwork` implementation using iroh’s `Endpoint`/`EndpointAddr` and `DHT_ALPN`.
 
+- **Discovery‑only API surface**
+  - `DiscoveryNode` wraps the core so applications can only perform peer discovery.
+  - Storage RPCs remain internal, preventing the sDHT from being abused as a
+    general key/value store.
+
 ---
 
 ## Status
@@ -97,18 +102,16 @@ A typical setup looks like:
 1. Create an iroh `Endpoint`.
 2. Build a `Contact` with your node ID and `EndpointAddr`.
 3. Wrap the endpoint in `IrohNetwork`.
-4. Construct a `DhtNode`.
+4. Construct a `DiscoveryNode`.
 5. Run the server loop to handle inbound RPC.
-6. Use the node to `put` / `get` keys.
+6. Feed observed contacts into the discovery node and run lookups.
 
 ```rust
-use std::sync::Arc;
-
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr};
 use iroh::protocol::Router;
 use iroh_sdht::{
-    derive_node_id, Contact, DhtNode, DhtProtocolHandler, IrohNetwork, DHT_ALPN,
+    derive_node_id, Contact, DiscoveryNode, DhtProtocolHandler, IrohNetwork, DHT_ALPN,
 };
 
 #[tokio::main]
@@ -133,15 +136,15 @@ async fn main() -> Result<()> {
         self_contact: self_contact.clone(),
     };
 
-    // 5. Create a DHT node (k = 20, alpha = 3 are reasonable starting values).
-    let dht = Arc::new(DhtNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3));
+    // 5. Create a discovery-only DHT node (k = 20, alpha = 3 are reasonable starting values).
+    let dht = DiscoveryNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3);
 
     // 6. Spin up the Router accept loop, mirroring the iroh echo example.
     let _router = Router::builder(endpoint.clone())
         .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
         .spawn();
 
-    // 7. Perform puts/gets using `dht.put` / `dht.get`.
+    // 7. Observe peers and issue iterative FIND_NODE lookups.
 
     Ok(())
 }
