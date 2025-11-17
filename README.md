@@ -2,470 +2,598 @@
 
 A Kademlia‑ and Coral‑inspired, latency‑aware “sloppy DHT” (sDHT) with adaptive dynamic tiering and backpressure controls, built on [iroh](https://github.com/n0-computer/iroh)’s QUIC transport.
 
-This crate aims to be a **practical, observable DHT core** for iroh‑based applications. The behavior described in this README is backed by concrete tests in the repository; where RFC 2119 keywords (**MUST**, **SHOULD**, **MAY**, etc.) are used, they refer to behavior that is either already enforced in tests or is a documented expectation for users.
+This crate exposes a small, embeddable DHT that you can plug into iroh‑based applications. It is transport‑agnostic at the core and ships with an iroh‑based network implementation and server glue.
 
 ---
 
-## Overview
+## Crate layout
 
-The core provides:
+The library is organized into four main modules:
 
-- **Kademlia‑style routing**  
-  32‑byte node IDs and keys derived from BLAKE3, XOR distance, and bucketed routing tables.
+- [`core`] – transport‑agnostic DHT logic:
+  - Node and key types (`NodeId`, `Key`).
+  - Hashing helpers (`derive_node_id`, `hash_content`, `verify_key_value_pair`).
+  - Routing table (`RoutingTable`) and distance helpers (`xor_distance`).
+  - Local storage and backpressure.
+  - Adaptive parameters (`k`, `α`) and latency tiering.
+  - The main DHT state machine (`DhtNode`) and its discovery‑oriented wrapper (`DiscoveryNode`).
+  - Network abstraction trait (`DhtNetwork`).
+- [`net`] – an iroh‑based implementation of `DhtNetwork` (`IrohNetwork`) plus the DHT ALPN label (`DHT_ALPN`).
+- [`protocol`] – RPC request/response types and the `DhtProtocol` definition for `irpc`.
+- [`server`] – a `DhtProtocolHandler` that plugs into iroh’s `Router` to serve DHT RPCs over QUIC.
 
-- **Coral‑style sloppy DHT behavior**  
-  Peers are grouped into **latency‑based tiers**, and lookups escalate from fast/near tiers to slower/further ones.
+The public re‑exports from `lib.rs` are:
 
-- **Adaptive dynamic tiering**  
-  Tier boundaries are learned from observed RTTs using a bounded k‑means variant. The number of latency tiers is chosen dynamically within configured limits.
+- Types and helpers from `core`:
 
-- **Backpressure‑aware storage**  
-  A local key/value store with soft limits on memory/disk and request rate, exposing a `pressure` signal and evicting or spilling under load.
+  ```rust
+  pub use core::{
+      derive_node_id,
+      hash_content,
+      verify_key_value_pair,
+      Contact,
+      DhtNetwork,
+      DiscoveryNode,
+      Key,
+      NodeId,
+      RoutingTable,
+  };
+  ```
 
-- **Adaptive parameters**  
-  Replication factor (`k`) and query concurrency (`α`) adjust based on churn and lookup success/failure.
+- Network and server glue:
 
-- **Iroh transport integration**  
-  A ready‑to‑use `IrohNetwork` implementation running over iroh’s QUIC `Endpoint`/`EndpointAddr`.
+  ```rust
+  pub use net::{IrohNetwork, DHT_ALPN};
+  pub use server::DhtProtocolHandler;
+  ```
 
----
+- Convenience re‑exports:
 
-## Implemented behaviors and scenarios
-
-This section describes the behaviors that are backed by the current test suite and example binary. Each subsection references the relevant test(s) or example file(s).
-
-### 1. Routing table behavior (`RoutingTable`)
-
-Tests: [`tests/routing_table.rs`](tests/routing_table.rs)
-
-#### 1.1 Ordering by XOR distance
-
-Given:
-
-- A `RoutingTable` with a self node ID (e.g. `0x00` in the first byte).
-- A set of contacts inserted via `RoutingTable::update`.
-
-The following **MUST** hold:
-
-- `RoutingTable::closest(target, limit)` **MUST** return contacts sorted by **increasing XOR distance** to the `target`.
-- For the specific case in `routing_table_orders_contacts_by_distance`:
-  - With contacts `0x10`, `0x20`, and `0x08` inserted,
-  - And target `0x18`,
-  - `closest(target, 3)` **MUST** return contacts whose first byte equals `[0x10, 0x08, 0x20]`.
-
-#### 1.2 Bucket capacity
-
-Given:
-
-- A `RoutingTable` created with `RoutingTable::new(self_id, k)`.
-
-The following **MUST** hold:
-
-- The table **MUST** enforce a capacity of at most `k` contacts per bucket.
-- In `routing_table_respects_bucket_capacity`:
-  - Creating a table with `k = 2`,
-  - Inserting three contacts (`0x80`, `0xC0`, `0xA0`),
-  - Calling `closest(target, 10)` **MUST** return exactly 2 contacts.
-  - The two returned contacts **MUST** include `0x80` and `0xC0`.
-
-#### 1.3 Dynamic `k` (`set_k`)
-
-Given:
-
-- A `RoutingTable` created with some initial `k_initial` and then updated to `k_new` using `set_k(k_new)`.
-
-The following **MUST** hold:
-
-- After calling `set_k(k_new)`, calls to `closest` **MUST** return at most `k_new` contacts per bucket, even if more contacts were previously stored.
-- In `routing_table_truncates_when_k_changes`:
-  - With `k_initial = 4` and 3 contacts inserted,
-  - After `set_k(2)`,
-  - `closest(target, 10)` **MUST** return exactly 2 contacts.
+  ```rust
+  pub use irpc;
+  pub use irpc_iroh;
+  ```
 
 ---
 
-### 2. Iterative FIND_NODE behavior and routing quality
+## Core concepts
+
+### Node and key identity
 
-Tests: [`tests/integration.rs`](tests/integration.rs), [`tests/iterative_find_node_scale.rs`](tests/iterative_find_node_scale.rs)
+The DHT uses 256‑bit identifiers for both nodes and content keys:
 
-#### 2.1 Small‑scale correctness
+- `NodeId` – `type NodeId = [u8; 32];`
+- `Key` – `type Key = [u8; 32];`
 
-Test: `iterative_find_node_returns_expected_contacts` in [`tests/integration.rs`](tests/integration.rs)
+Helpers:
 
-Given:
+- `derive_node_id(data: &[u8]) -> NodeId`  
+  Hashes arbitrary input with BLAKE3 and returns a 32‑byte digest, suitable for deriving a stable node ID from an iroh endpoint identity (`endpoint.id().as_bytes()`).
 
-- Three nodes: `main`, `peer_one`, `peer_two`.
-- `main` observes `peer_one` and `peer_two` via `observe_contact`.
-- `peer_one` and `peer_two` observe `main`.
+- `hash_content(data: &[u8]) -> Key`  
+  Returns a 32‑byte BLAKE3 digest of the content bytes. This is used as the content‑addressed key for `put`/`get`.
 
-The following **MUST** hold:
+- `verify_key_value_pair(key: &Key, value: &[u8]) -> bool`  
+  Returns `true` iff `key == hash_content(value)`.
 
-- A call to `main.node.iterative_find_node(peer_two.id)` **MUST**:
-  - Return a result list whose first element’s `id` equals `peer_two.id`.
-  - Return a result list that **SHOULD** contain a contact whose `id` equals `peer_one.id`.
+These helpers are used throughout the crate to ensure consistent hashing and integrity.
 
-This scenario establishes that, for a simple topology, `iterative_find_node` returns the exact target at the front and preserves useful intermediate contacts.
+### Distance and routing
 
-#### 2.2 Large‑scale routing quality and overlap
+The DHT uses XOR distance over `NodeId`:
 
-Test: `iterative_find_node_quality_report` in [`tests/iterative_find_node_scale.rs`](tests/iterative_find_node_scale.rs)
+- `xor_distance(a: &NodeId, b: &NodeId) -> [u8; 32]`  
+  Computes `a ^ b` byte‑wise.
 
-Given:
+- Internal helper `distance_cmp(&[u8; 32], &[u8; 32])`  
+  Compares distances lexicographically to define an ordering.
 
-- A swarm of **1024 nodes** constructed via `TestNode::new`, sharing a `NetworkRegistry`.
-- Each node’s routing table populated with **all other nodes** using `observe_contact`.
-- `K_PARAM = 20`, `TARGET_SAMPLES = 512`, `ORIGINS_PER_TARGET = 10`.
+Routing is based on a Kademlia‑style routing table:
 
-The test:
+```rust
+pub struct Contact {
+    pub id: NodeId,
+    pub addr: String, // typically JSON-encoded EndpointAddr
+}
 
-1. **MUST** compute, for each random target `NodeId`, the **perfect set** of `k` closest node IDs by brute‑force XOR distance over all node IDs.
-2. **MUST** select multiple origin nodes per target.
-3. For each (origin, target) pair, **MUST**:
-   - Run `iterative_find_node(target)`.
-   - Collect the returned contact IDs.
-   - Compute the **overlap** between the perfect set and the returned set.
-   - Compute `overlap_fraction = (#perfect ∩ result) / k`.
-   - Track whether the single closest perfect node is present in the result (`closest_present`).
+pub struct RoutingTable {
+    self_id: NodeId,
+    k: usize,
+    buckets: Vec<Bucket>, // 256 buckets for 256-bit IDs
+}
+```
 
-The test then:
+**Key behaviors:**
 
-- **MUST** compute:
-  - `mean_overlap_fraction` across all samples.
-  - `median_overlap_fraction` across all samples.
-  - A histogram (`HISTOGRAM_BUCKETS = 10`) of overlap fractions over `[0.0, 1.0]`.
-- **MUST** print an aggregate report as **pretty‑printed JSON** with the fields:
-  - `node_count`
-  - `target_samples`
-  - `origins_per_target`
-  - `routing_table_population`
-  - `mean_overlap_fraction`
-  - `median_overlap_fraction`
-  - `histogram` (each bucket includes `bucket_start`, `bucket_end`, `count`)
-  - `sample_count`
-- **MUST** print CSV data with:
-  - Header line:  
-    `origin_index,target_index,overlap_fraction,closest_present`
-  - One line per (origin, target) query.
+- `RoutingTable::new(self_id, k)`:
+  - Initializes 256 buckets.
+- `RoutingTable::update(contact)`:
+  - Computes the bucket index based on the first differing bit between `self_id` and `contact.id`.
+  - Adds or refreshes the contact in an LRU‑like bucket (`Bucket::touch`), up to capacity `k`.
+- `RoutingTable::set_k(k)`:
+  - Updates the table’s `k` and truncates any buckets that currently hold more than `k` contacts.
+- `RoutingTable::closest(target, k)`:
+  - Flattens all buckets, sorts all contacts by XOR distance to `target`, and returns up to `k` contacts.
 
-Finally, the test asserts that:
+The bucket index is computed via:
 
-- **For all samples**, the single closest node from the perfect set **MUST** be present in the results:
-  - `samples.iter().all(|row| row.closest_present)` **MUST** hold.
+```rust
+fn bucket_index(self_id: &NodeId, other: &NodeId) -> usize {
+    // XOR, then find the index (0..=255) of the first differing bit.
+}
+```
 
-This gives you a spec‑like guarantee: with fully populated routing tables, `iterative_find_node` **MUST** always return the closest possible node, and the rest of the result set is quantitatively close to the ideal set.
+### Local store and backpressure
 
----
+The crate includes a small in‑memory content store for values keyed by `Key`:
 
-### 3. Data distribution and replication
+```rust
+struct LocalStore {
+    entries: HashMap<Key, Vec<u8>>,
+    order: VecDeque<Key>,        // LRU-ish eviction order
+    pressure: PressureMonitor,
+}
+```
+
+- `LocalStore::store(key, value)`:
+  - Replaces any existing value, updates internal byte accounting, and enqueues the key in `order`.
+  - If the computed pressure exceeds `PRESSURE_THRESHOLD`, it evicts entries from the front of `order` (oldest first), accumulating them in a `spilled` list.
+  - Marks that a spill happened if any keys were evicted.
+- `LocalStore::get(key)`:
+  - Returns a cloned value if present, and moves the key to the back of `order` (recently used).
+- `LocalStore::current_pressure()` / `LocalStore::len()`:
+  - Expose current pressure and stored key count.
 
-Test: `data_distribution_is_relatively_even` in [`tests/data_distribution.rs`](tests/data_distribution.rs)
+Backpressure is tracked by a `PressureMonitor`:
 
-Given:
-
-- A swarm of **256 nodes** with:
-  - `K_PARAM = 20`, `ALPHA_PARAM = 3`.
-- A ring‑plus‑random adjacency:
-  - Each node has at least `MIN_CONTACTS_PER_NODE = 24` neighbors.
-- Routing tables initially populated with ring neighbors, then fully populated with all contacts.
-- Per‑node pressure limits relaxed via `override_pressure_limits` to avoid premature backpressure during this test.
-- `TOTAL_PUTS = 2048` with `PAYLOAD_LEN = 64`.
-
-The test:
-
-1. **MUST** issue `TOTAL_PUTS` `put` operations:
-   - Each originating from a random node.
-   - Each with random payload (so keys are random BLAKE3 hashes).
-2. After all PUTs, it **MUST**:
-   - Call `telemetry_snapshot()` on every node.
-   - Collect `(node_index, snapshot.stored_keys)` pairs.
-
-From this data, the test:
-
-- **MUST** compute:
-  - Total number of stored keys.
-  - Per‑node minimum, maximum, and mean stored key counts.
-  - Standard deviation of per‑node stored key counts.
-  - Coefficient of variation = `stddev / mean`.
-- **MUST** print:
-  - CSV header: `node_index,stored_keys`
-  - One line per node with index and key count.
-  - Summary line:  
-    `summary,min,max,mean,stddev,total_keys`
-  - Coefficient of variation line:  
-    `summary_cv,<coefficient_of_variation>`
-
-The test asserts that:
-
-- Every node **MUST** store at least one key: `min > 0`.
-- The exact threshold for “even distribution” is not enforced as an assertion, but the coefficient of variation **SHOULD** be reasonably small in practice.
-
-This scenario gives you:
-
-- A **MUST** guarantee that no node is completely idle after a large number of random PUTs.
-- A **SHOULD** level expectation that keys are roughly evenly replicated across the swarm, visible via the printed metrics.
-
----
-
-### 4. Adaptive parameters and backpressure
-
-Tests: `adaptive_k_tracks_network_successes_and_failures`, `backpressure_spills_large_values_and_records_pressure` in [`tests/integration.rs`](tests/integration.rs)
-
-#### 4.1 Adaptive replication factor under failures
-
-Given:
-
-- Two nodes `main` and `peer`, both part of a mocked network (`NetworkRegistry`).
-- An initial configuration with `k = 10` (as used in the test).
-- `main` and `peer` observing each other via `observe_contact`.
-
-The test:
-
-1. **MUST** configure the network so that all RPCs to `peer` **fail**, via `main.network.set_failure(peer.id, true)`.
-2. **MUST** run `main.node.iterative_find_node(target)` under these failure conditions:
-   - The lookup **MUST** succeed or at least **MUST NOT** panic.
-3. After this, a `telemetry_snapshot()` from `main`:
-   - **MUST** report `replication_factor == 30`.
-
-Then:
-
-4. **MUST** configure the network so that RPCs to `peer` succeed again via `set_failure(peer.id, false)`.
-5. **MUST** run `iterative_find_node(target)` again.
-6. A new `telemetry_snapshot()` from `main`:
-   - **MUST** report `replication_factor == 20`.
-
-This scenario demonstrates that:
-
-- Under persistent failures, the node **MUST** raise its effective replication factor.
-- After successful operations, it **MUST** reduce `replication_factor` back toward a lower baseline.
-
-#### 4.2 Backpressure and spilling large values
-
-Given:
-
-- A node `node` with `k = 20`, `α = 3`.
-- A `peer` contact.
-- A large `value` (~12 MiB) and `key = hash_content(value)`.
-
-The test:
-
-1. **MUST** call `node.node.handle_store_request(&peer, key, value)` directly.
-2. **MUST** then call `telemetry_snapshot()` on the node.
-3. The snapshot:
-   - **MUST** report `pressure >= 0.99`.
-   - **MUST** report `stored_keys == 0` (the large value is not kept locally).
-4. The test **MUST** then inspect `node.network.store_calls()`:
-   - There **MUST** be at least one store call recorded.
-   - The first store call:
-     - `contact.id` **MUST** equal `peer.id`.
-     - The stored key **MUST** equal `key`.
-     - The stored length **MUST** equal `value.len()`.
-
-This scenario establishes that:
-
-- Under heavy load from large values, the node **MUST** signal high `pressure`.
-- It **MUST** spill or forward such values instead of storing them locally.
-- The forwarding behavior **MUST** be observable via the mock network’s recorded calls.
-
----
-
-### 5. Latency‑based tiering
-
-Test: `tiering_clusters_contacts_by_latency` in [`tests/integration.rs`](tests/integration.rs)
-
-Given:
-
-- A node `main`.
-- Three peers `fast`, `medium`, `slow`.
-- `main` and all peers observe each other via `observe_contact`.
-- The mocked network configured with:
-  - `fast`: 5 ms latency.
-  - `medium`: 25 ms latency.
-  - `slow`: 50 ms latency.
-
-The test:
-
-1. **MUST** run `main.node.iterative_find_node(target)`.
-2. **MUST** then call `telemetry_snapshot()` on `main`.
-
-The snapshot:
-
-- **MUST** report `tier_centroids.len() >= 2`.
-- The sum of `tier_counts` **MUST** equal 3 (all peers assigned to tiers).
-- `tier_centroids.first().unwrap()` **MUST** be less than `tier_centroids.last().unwrap()`, reflecting increasing latency from fastest to slowest tier.
-
-This gives a concrete guarantee that:
-
-- The implementation **MUST** cluster peers by observed latency into tiers.
-- The tiering information **MUST** be visible via telemetry.
-
----
-
-### 6. Chatroom example: DHT used for peer discovery
-
-Example: [`examples/chatroom.rs`](examples/chatroom.rs)
-
-The chatroom example is an application that uses `iroh-sdht` for **peer discovery only**; chat messages themselves are sent directly over QUIC.
-
-#### 6.1 Setup
-
-The example:
-
-- **MUST** run an iroh `Endpoint` configured with:
-  - `DHT_ALPN` for DHT traffic.
-  - `CHAT_ALPN` (`b"iroh-chatroom/1"`) for chat messages.
-- **MUST** derive a DHT `node_id` from the iroh endpoint identity via `derive_node_id`.
-- **MUST** build a `Contact` using:
-  - `id = node_id`.
-  - `addr` as a JSON‑encoded `EndpointAddr`.
-- **MUST** wrap the endpoint and contact into an `IrohNetwork`.
-- **MUST** construct a `DiscoveryNode` using that network.
-
-The chatroom **MUST**:
-
-- Register `DhtProtocolHandler` on `DHT_ALPN`.
-- Register `ChatProtocolHandler` on `CHAT_ALPN`.
-
-#### 6.2 Discovery behavior
-
-When sending a chat message to a room:
-
-1. The example **MUST** derive a “room discovery key”:
-   - Via `room_discovery_key(room)` which uses `hash_content(room.as_bytes())`.
-2. It **MUST** call `dht.iterative_find_node(discovery_key)` to retrieve DHT contacts.
-3. It **MUST** merge:
-   - Static peers, provided via CLI `--peer` (as JSON `EndpointAddr`) and `/add`.
-   - Dynamic peers, interpreting each `Contact.addr` as JSON `EndpointAddr`.
-4. It **MUST** avoid duplicates when merging.
-
-This ensures that the DHT is used to discover peers that “belong” to a room, but does not handle the chat payload itself.
-
-#### 6.3 Chat transport behavior
-
-For each peer `EndpointAddr`:
-
-- The example **MUST** open a QUIC connection using `CHAT_ALPN`.
-- It **MUST** send a single length‑prefixed JSON `ChatMessage`:
-  - 4‑byte big‑endian length.
-  - JSON payload.
-- It **MAY** read a small ACK frame (the example does, but ignores the body).
-- It **MUST NOT** store chat messages in the DHT:
-  - Chat messages are never passed to any `put`/`store` DHT APIs.
-  - DHT is strictly used as a discovery mechanism.
-
-#### 6.4 REPL behavior
-
-The chatroom REPL:
-
-- **MUST** support `/add <addr-json>`:
-  - Parses JSON into `EndpointAddr`.
-  - On success, appends it to the peer list and prints confirmation.
-  - On error, prints a descriptive message.
-- **MUST** support `/peers`:
-  - Prints the current static peer list (CLI + `/add`).
-  - Dynamic peers from the DHT are not persisted but are used for each send.
-- **MUST** support `/quit`:
-  - Exits the application.
-- Any other non‑empty line **MUST** be interpreted as a chat message:
-  - It is sent to all known peers in the room (static + DHT‑discovered), as described above.
-
----
-
-## Telemetry API
-
-You can inspect the node’s internal behavior via:
+```rust
+struct PressureMonitor {
+    current_bytes: usize,
+    requests: VecDeque<Instant>,
+    request_window: Duration,
+    request_limit: usize,
+    disk_limit: usize,
+    memory_limit: usize,
+    current_pressure: f32,
+}
+```
+
+It combines:
+
+- Approximate disk/memory usage (`current_bytes` vs soft limits).
+- Request rate (count of recent store/get requests within `PRESSURE_REQUEST_WINDOW`).
+- Into a normalized `current_pressure` in `[0.0, 1.0]`.
+
+If entries are evicted from the store due to pressure, `record_spill()` is called so the pressure signal reflects the spill event.
+
+Applications and tests can relax or override the soft limits using `DiscoveryNode::override_pressure_limits`.
+
+### Latency tiering
+
+Latency tiering assigns contacts to dynamic latency tiers based on observed RTTs.
+
+Key structures:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TieringLevel(usize);
+
+#[derive(Clone, Debug, Default)]
+pub struct TieringStats {
+    pub centroids: Vec<f32>, // ms (fastest → slowest)
+    pub counts: Vec<usize>,  // number of peers per tier
+}
+
+struct TieringManager {
+    assignments: HashMap<NodeId, TieringLevel>,
+    samples: HashMap<NodeId, VecDeque<f32>>,
+    centroids: Vec<f32>,
+    last_recompute: Instant,
+    min_tiers: usize,
+    max_tiers: usize,
+}
+```
+
+Key behaviors:
+
+- `register_contact(node)`:
+  - Ensures a contact has an assigned `TieringLevel` (defaulting to a middle tier).
+- `record_sample(node, rtt_ms)`:
+  - Records a bounded history of RTT samples per node and triggers a periodic recomputation.
+- `stats()`:
+  - Returns `TieringStats` with centroids and counts.
+- Recomputations run a bounded k‑means variant (`dynamic_kmeans`) over per‑node average RTTs:
+  - Chooses `k` between `MIN_LATENCY_TIERS` and `MAX_LATENCY_TIERS`.
+  - Applies a penalty factor (`TIERING_PENALTY_FACTOR`) to avoid over‑fragmentation.
+  - Ensures no empty tiers (`ensure_tier_coverage`).
+  - Sorts centroids from fastest to slowest and remaps assignments accordingly.
+
+Latency levels are used by the DHT node to:
+
+- Filter candidate contacts for tier‑specific lookups (e.g., fast tiers first).
+- Select a “slowest” tier for offloading spilled values.
+
+### Adaptive parameters (`k` and `α`)
+
+Adaptive behavior is encapsulated in `AdaptiveParams`:
+
+```rust
+struct AdaptiveParams {
+    k: usize,
+    alpha: usize,
+    churn_history: VecDeque<bool>,
+    query_history: VecDeque<bool>,
+}
+```
+
+- `record_churn(success: bool)`:
+  - Tracks success/failure of operations relevant to churn (e.g., replications, RPCs).
+  - Uses a sliding window of size `QUERY_STATS_WINDOW`.
+  - Computes a churn rate and adjusts `k` in a bounded range `[10, 30]`.
+- `record_query_success(success: bool)`:
+  - Tracks lookup successes/failures.
+  - Adjusts `alpha` in `{2, 3, 4, 5}` based on the success rate:
+    - Very low success → higher `α`.
+    - High success → lower `α`.
+
+`DhtNode` uses these to:
+
+- Adapt the routing table’s effective `k` (`RoutingTable::set_k`) when churn changes.
+- Adjust lookup concurrency during iterative searches and GETs.
+
+### Telemetry
+
+The crate exposes a compact telemetry struct:
+
+```rust
+#[derive(Clone, Debug, Default)]
+pub struct TelemetrySnapshot {
+    pub tier_centroids: Vec<f32>,
+    pub tier_counts: Vec<usize>,
+    pub pressure: f32,
+    pub stored_keys: usize,
+    pub replication_factor: usize,
+    pub concurrency: usize,
+}
+```
+
+- `tier_centroids` / `tier_counts` come from the `TieringManager`.
+- `pressure` and `stored_keys` come from the `LocalStore`.
+- `replication_factor` / `concurrency` mirror the current `k` and `α` from `AdaptiveParams`.
+
+You can obtain a snapshot via:
 
 ```rust
 let snapshot = dht.telemetry_snapshot().await;
 ```
 
-`TelemetrySnapshot` includes:
-
-- `tier_centroids: Vec<f32>` – latency tier centers in ms (fast → slow).
-- `tier_counts: Vec<usize>` – number of peers in each tier.
-- `pressure: f32` – backpressure signal in `[0.0, 1.0]`.
-- `stored_keys: usize` – number of keys in the local store.
-- `replication_factor: usize` – current effective `k`.
-- `concurrency: usize` – current effective `alpha`.
-
-The tests above define how these values **MUST** behave under specific scenarios. You **SHOULD** export them into your metrics / logging system to monitor:
-
-- Routing quality.
-- Data distribution.
-- Adaptive parameter behavior.
-- Tiering behavior under varying latency.
+The example binary (`src/main.rs`) logs this periodically.
 
 ---
 
-## Minimal integration example
+## DhtNetwork abstraction
 
-To embed `iroh-sdht` in your own application, a typical setup is:
+The DHT core is independent of the transport layer. It talks to peers via a `DhtNetwork` trait:
 
-```toml
-[dependencies]
-iroh-sdht = "0.x"                  # this crate
-iroh = "0.x"                       # for Endpoint / QUIC transport
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
+```rust
+#[async_trait]
+pub trait DhtNetwork: Send + Sync + 'static {
+    async fn find_node(&self, to: &Contact, target: NodeId) -> Result<Vec<Contact>>;
+
+    /// Return (value, closer_nodes).
+    async fn find_value(&self, to: &Contact, key: Key)
+        -> Result<(Option<Vec<u8>>, Vec<Contact>)>;
+
+    async fn store(&self, to: &Contact, key: Key, value: Vec<u8>) -> Result<()>;
+}
 ```
+
+Implementors are responsible for:
+
+- Encoding/decoding RPC messages.
+- Establishing connections to `Contact.addr`.
+- Mapping transport errors into `anyhow::Result`.
+
+The crate provides one implementation:
+
+### IrohNetwork (QUIC over iroh)
+
+```rust
+pub struct IrohNetwork {
+    pub endpoint: Endpoint,
+    pub self_contact: Contact,
+}
+
+pub const DHT_ALPN: &[u8] = b"myapp/dht/1";
+```
+
+`IrohNetwork`:
+
+- Encodes `Contact.addr` as JSON `EndpointAddr`.
+- Builds an `irpc` client bound to `DHT_ALPN`.
+- Implements `DhtNetwork` by invoking RPCs defined in `protocol`:
+
+  - `FindNodeRequest` → `Vec<Contact>`
+  - `FindValueRequest` → `FindValueResponse { value, closer }`
+  - `StoreRequest` → `()`
+
+This lets you run the DHT over iroh’s QUIC transport with minimal glue.
+
+---
+
+## DhtProtocol and server integration
+
+The `protocol` module defines the RPC payloads:
+
+```rust
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PingRequest { pub from: Contact }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FindNodeRequest { pub from: Contact, pub target: NodeId }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FindValueRequest { pub from: Contact, pub key: Key }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoreRequest { pub from: Contact, pub key: Key, pub value: Vec<u8> }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FindValueResponse {
+    pub value: Option<Vec<u8>>,
+    pub closer: Vec<Contact>,
+}
+```
+
+And an `irpc` RPC enum:
+
+```rust
+#[rpc_requests(message = DhtMessage)]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum DhtProtocol {
+    #[rpc(tx = oneshot::Sender<Vec<Contact>>)]
+    FindNode(FindNodeRequest),
+
+    #[rpc(tx = oneshot::Sender<FindValueResponse>)]
+    FindValue(FindValueRequest),
+
+    #[rpc(tx = oneshot::Sender<()>>)]
+    Store(StoreRequest),
+
+    #[rpc(tx = oneshot::Sender<()>>)]
+    Ping(PingRequest),
+}
+```
+
+The `server` module wires this into iroh’s `Router`:
+
+```rust
+#[derive(Clone)]
+pub struct DhtProtocolHandler {
+    inner: Arc<IrohProtocol<DhtProtocol>>,
+}
+```
+
+- `DhtProtocolHandler::new(node: DiscoveryNode<N>)`:
+  - Spawns a small server loop that receives `DhtMessage` instances from `irpc_iroh`.
+  - Dispatches them to the appropriate handlers:
+    - `handle_find_node` → `DiscoveryNode::handle_find_node_request`
+    - `handle_find_value` → `DiscoveryNode::handle_find_value_request`
+    - `handle_store` → `DiscoveryNode::handle_store_request`
+    - `handle_ping` → sends an empty `()` response.
+
+- Implements iroh’s `ProtocolHandler`:
+  - `accept(connection)` forwards to `IrohProtocol<DhtProtocol>::accept(connection)`.
+
+### Using DhtProtocolHandler with iroh
+
+You typically wire the server side like this:
+
+```rust
+use iroh::protocol::Router;
+use iroh_sdht::{DhtProtocolHandler, DiscoveryNode, IrohNetwork, DHT_ALPN, Contact, derive_node_id};
+
+let endpoint = /* build an iroh Endpoint */;
+let addr: EndpointAddr = endpoint.addr();
+let node_id = derive_node_id(endpoint.id().as_bytes());
+let self_contact = Contact {
+    id: node_id,
+    addr: serde_json::to_string(&addr)?,
+};
+let network = IrohNetwork { endpoint: endpoint.clone(), self_contact };
+let dht = DiscoveryNode::new(node_id, self_contact, network, /*k*/ 20, /*alpha*/ 3);
+
+let _router = Router::builder(endpoint.clone())
+    .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
+    .spawn();
+```
+
+---
+
+## DhtNode and DiscoveryNode
+
+### DhtNode
+
+`DhtNode<N: DhtNetwork>` is the internal state machine that owns:
+
+- `id: NodeId` – the node’s identifier.
+- `self_contact: Contact` – how to reach this node.
+- `routing: Arc<Mutex<RoutingTable>>` – routing table.
+- `store: Arc<Mutex<LocalStore>>` – local content store.
+- `network: Arc<N>` – implementation of `DhtNetwork`.
+- `params: Arc<Mutex<AdaptiveParams>>` – adaptive `k`, `α`.
+- `tiering: Arc<Mutex<TieringManager>>` – latency tier management.
+- `escalation: Arc<Mutex<QueryEscalation>>` – tier‑specific miss history.
+
+Key methods (internal; accessed via `DiscoveryNode`):
+
+- `observe_contact(contact: Contact)` – incorporate new peers into tiering and routing.
+- `handle_find_node_request(from, target) -> Vec<Contact>` – serve `FIND_NODE`.
+- `handle_find_value_request(from, key) -> (Option<Vec<u8>>, Vec<Contact>)` – serve `FIND_VALUE`.
+- `handle_store_request(from, key, value)` – store or spill a value.
+- `iterative_find_node(target) -> Result<Vec<Contact>>` – perform iterative node lookup.
+- `iterative_find_value(key) -> Result<(Option<Vec<u8>>, Vec<Contact>)>` – perform iterative value lookup.
+- `put(value) -> Result<Key>` – local+remote replication based on distance.
+- `get(key) -> Result<Option<Vec<u8>>>` – GET with integrity, tier escalation, and re‑replication.
+- `telemetry_snapshot() -> TelemetrySnapshot` – capture internal metrics.
+
+`DhtNode` is not exported directly; instead, the crate exposes `DiscoveryNode` which wraps these capabilities in a more constrained API.
+
+### DiscoveryNode
+
+`DiscoveryNode<N: DhtNetwork>` is the public, clonable handle you use in applications:
+
+```rust
+pub struct DiscoveryNode<N: DhtNetwork> {
+    inner: Arc<DhtNode<N>>,
+}
+```
+
+Public methods:
+
+- Construction and identity:
+
+  ```rust
+  pub fn new(id: NodeId, self_contact: Contact, network: N, k: usize, alpha: usize) -> Self;
+  pub fn contact(&self) -> Contact;
+  pub fn node_id(&self) -> NodeId;
+  ```
+
+- Routing and discovery:
+
+  ```rust
+  pub async fn observe_contact(&self, contact: Contact);
+  pub async fn iterative_find_node(&self, target: NodeId) -> Result<Vec<Contact>>;
+  ```
+
+- Telemetry:
+
+  ```rust
+  pub async fn telemetry_snapshot(&self) -> TelemetrySnapshot;
+  ```
+
+- RPC entry points (used by the server side):
+
+  ```rust
+  pub async fn handle_find_node_request(&self, from: &Contact, target: NodeId) -> Vec<Contact>;
+  pub async fn handle_find_value_request(
+      &self,
+      from: &Contact,
+      key: Key,
+  ) -> (Option<Vec<u8>>, Vec<Contact>);
+  pub async fn handle_store_request(&self, from: &Contact, key: Key, value: Vec<u8>);
+  ```
+
+- Backpressure configuration:
+
+  ```rust
+  pub async fn override_pressure_limits(
+      &self,
+      disk_limit: usize,
+      memory_limit: usize,
+      request_limit: usize,
+  );
+  ```
+
+- Data replication (primarily for internal and diagnostic use):
+
+  ```rust
+  pub async fn put(&self, value: Vec<u8>) -> Result<Key>;
+  ```
+
+Internally, `DiscoveryNode` forwards to the inner `DhtNode` and ensures that all operations run through the adaptive, tiering, and telemetry logic.
+
+---
+
+## Example binary (`src/main.rs`)
+
+The repository includes a small example binary that:
+
+- Creates an iroh `Endpoint` with `DHT_ALPN`.
+- Optionally enables mDNS discovery (`MdnsDiscovery`) for local peer discovery, and falls back to relay mode otherwise.
+- Derives a `NodeId` from the endpoint identity.
+- Creates a `Contact` using the node ID and JSON‑encoded `EndpointAddr`.
+- Constructs an `IrohNetwork` and `DiscoveryNode`.
+- Registers `DhtProtocolHandler` on the router for `DHT_ALPN`.
+- Spawns a periodic telemetry logger that prints:
+
+  - `pressure`
+  - `stored_keys`
+  - `tier_counts`
+  - `tier_centroids`
+  - `replication_factor` (`k`)
+  - `concurrency` (`α`)
+
+- Parks the main task with `future::pending::<()>().await`, leaving the node running to serve RPCs.
+
+You can run it with:
+
+```bash
+cargo run
+```
+
+and then connect other instances or tools that speak the same `DhtProtocol` over iroh.
+
+---
+
+## Minimal usage outline
+
+To embed `iroh-sdht` into your own iroh application:
+
+1. Create an iroh `Endpoint`.
+2. Derive a DHT `NodeId` from the endpoint identity.
+3. Build a `Contact` with `NodeId` and JSON `EndpointAddr`.
+4. Wrap the endpoint in `IrohNetwork`.
+5. Construct a `DiscoveryNode`.
+6. Register `DhtProtocolHandler` on a `Router` for `DHT_ALPN`.
+7. Feed observed contacts into `DiscoveryNode` and use `iterative_find_node` for discovery.
 
 ```rust
 use anyhow::Result;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, RelayMode};
 use iroh::protocol::Router;
 use iroh_sdht::{
-    derive_node_id, Contact, DiscoveryNode, DhtProtocolHandler, IrohNetwork, DHT_ALPN,
+    derive_node_id,
+    Contact,
+    DiscoveryNode,
+    DhtProtocolHandler,
+    IrohNetwork,
+    NodeId,
+    DHT_ALPN,
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 1. Build an iroh Endpoint. See iroh docs for full configuration.
-    let (endpoint, addr): (Endpoint, EndpointAddr) = /* construct or obtain an Endpoint */ {
-        unimplemented!("set up your iroh Endpoint here");
-    };
+async fn launch(endpoint: Endpoint, addr: EndpointAddr) -> Result<()> {
+    // Derive node ID
+    let node_id: NodeId = derive_node_id(endpoint.id().as_bytes());
 
-    // 2. Derive a stable DHT node ID from the iroh endpoint identity.
-    let node_id = derive_node_id(endpoint.id().as_bytes());
-
-    // 3. Build our Contact. We store EndpointAddr as JSON in `addr`.
+    // Build contact (EndpointAddr as JSON)
     let self_contact = Contact {
         id: node_id,
         addr: serde_json::to_string(&addr)?,
     };
 
-    // 4. Wrap the endpoint in an IrohNetwork.
+    // Wrap in an IrohNetwork
     let network = IrohNetwork {
-        endpoint,
+        endpoint: endpoint.clone(),
         self_contact: self_contact.clone(),
     };
 
-    // 5. Create a discovery-only DHT node (k = 20, alpha = 3 are reasonable starting values).
-    let dht = DiscoveryNode::new(node_id, self_contact, network, /*k=*/ 20, /*alpha=*/ 3);
+    // Create discovery node with chosen k and alpha
+    let dht = DiscoveryNode::new(node_id, self_contact, network, /*k*/ 20, /*alpha*/ 3);
 
-    // 6. Spin up the Router accept loop.
+    // Register DHT protocol handler
     let _router = Router::builder(endpoint.clone())
         .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
         .spawn();
 
-    // 7. Observe peers and issue iterative FIND_NODE or FIND_VALUE lookups via `dht`.
+    // Now you can:
+    // - observe peers: dht.observe_contact(contact).await;
+    // - perform lookups: let nodes = dht.iterative_find_node(target_id).await?;
+    // - inspect telemetry: let snap = dht.telemetry_snapshot().await;
 
     Ok(())
 }
 ```
-
----
-
-## When to use this vs. “plain” Kademlia
-
-Use this library if you:
-
-- Already use iroh (or want a QUIC‑based, NAT‑friendly transport).
-- Care about **latency‑aware routing**, not just hop count.
-- Want **bounded**, **adaptive** behavior:
-  - Dynamic tiering based on RTTs.
-  - Adaptive `k`/`α`.
-  - Backpressure and eviction/spilling instead of unbounded growth.
-
-If you just need a minimal, spec‑like Kademlia for an academic project, a simpler Kademlia crate may be enough. This crate targets “small but realistic” DHT deployments.
 
 ---
 
