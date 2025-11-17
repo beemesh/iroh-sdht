@@ -457,6 +457,12 @@ impl LocalStore {
         }
     }
 
+    fn override_limits(&mut self, disk_limit: usize, memory_limit: usize, request_limit: usize) {
+        self.pressure.disk_limit = disk_limit;
+        self.pressure.memory_limit = memory_limit;
+        self.pressure.request_limit = request_limit;
+    }
+
     fn record_request(&mut self) {
         self.pressure.record_request();
         let len = self.entries.len();
@@ -858,6 +864,16 @@ impl<N: DhtNetwork> DhtNode<N> {
         let mut store = self.store.lock().await;
         store.record_request();
         store.get(key)
+    }
+
+    async fn override_pressure_limits(
+        &self,
+        disk_limit: usize,
+        memory_limit: usize,
+        request_limit: usize,
+    ) {
+        let mut store = self.store.lock().await;
+        store.override_limits(disk_limit, memory_limit, request_limit);
     }
 
     /// Answer a FIND_NODE coming from the network.
@@ -1407,6 +1423,28 @@ impl<N: DhtNetwork> DiscoveryNode<N> {
 
     pub async fn handle_store_request(&self, from: &Contact, key: Key, value: Vec<u8>) {
         self.inner.handle_store_request(from, key, value).await;
+    }
+
+    /// Relax the backpressure thresholds, primarily for large-scale simulations
+    /// and integration tests that need to disable spilling.
+    pub async fn override_pressure_limits(
+        &self,
+        disk_limit: usize,
+        memory_limit: usize,
+        request_limit: usize,
+    ) {
+        self.inner
+            .override_pressure_limits(disk_limit, memory_limit, request_limit)
+            .await;
+    }
+
+    /// Store a value in the DHT, returning the content hash key.
+    ///
+    /// This exposes the same distance-based replication logic used internally by
+    /// [`DhtNode`] so large-scale integration tests and diagnostics can probe
+    /// how data placement behaves without needing access to private fields.
+    pub async fn put(&self, value: Vec<u8>) -> Result<Key> {
+        self.inner.put(value).await
     }
 
     pub(crate) fn inner(&self) -> Arc<DhtNode<N>> {
