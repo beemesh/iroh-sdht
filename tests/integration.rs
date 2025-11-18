@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use common::{make_contact, make_node_id, NetworkRegistry, TestNode};
 use iroh_sdht::hash_content;
-use tokio::time::Duration;
+use tokio::time::{sleep, Duration};
 
 #[tokio::test]
 async fn iterative_find_node_returns_expected_contacts() {
@@ -118,4 +118,61 @@ async fn tiering_clusters_contacts_by_latency() {
     assert!(snapshot.tier_centroids.len() >= 2);
     assert_eq!(snapshot.tier_counts.iter().sum::<usize>(), 3);
     assert!(snapshot.tier_centroids.first().unwrap() < snapshot.tier_centroids.last().unwrap());
+}
+
+#[tokio::test]
+async fn responsive_contacts_survive_bucket_eviction() {
+    let registry = Arc::new(NetworkRegistry::default());
+    let main = TestNode::new(registry.clone(), 0x00, 1, 2).await;
+    let responsive = TestNode::new(registry.clone(), 0x80, 1, 2).await;
+    let challenger = TestNode::new(registry.clone(), 0xC0, 1, 2).await;
+
+    main.node.observe_contact(responsive.contact()).await;
+    main.node.observe_contact(challenger.contact()).await;
+
+    sleep(Duration::from_millis(20)).await;
+
+    let closest = main
+        .node
+        .handle_find_node_request(&main.contact(), challenger.contact().id)
+        .await;
+    assert_eq!(closest.len(), 1);
+    assert_eq!(closest[0].id, responsive.contact().id);
+}
+
+#[tokio::test]
+async fn failed_pings_trigger_bucket_replacement() {
+    let registry = Arc::new(NetworkRegistry::default());
+    let main = TestNode::new(registry.clone(), 0x00, 1, 2).await;
+    let stale = TestNode::new(registry.clone(), 0x80, 1, 2).await;
+    let newcomer = TestNode::new(registry.clone(), 0xC0, 1, 2).await;
+
+    main.node.observe_contact(stale.contact()).await;
+    main.network.set_failure(stale.contact().id, true).await;
+    main.node.observe_contact(newcomer.contact()).await;
+
+    sleep(Duration::from_millis(20)).await;
+
+    let closest = main
+        .node
+        .handle_find_node_request(&main.contact(), newcomer.contact().id)
+        .await;
+    assert_eq!(closest.len(), 1);
+    assert_eq!(closest[0].id, newcomer.contact().id);
+}
+
+#[tokio::test]
+async fn bucket_refreshes_issue_pings_before_eviction() {
+    let registry = Arc::new(NetworkRegistry::default());
+    let main = TestNode::new(registry.clone(), 0x00, 1, 2).await;
+    let incumbent = TestNode::new(registry.clone(), 0x80, 1, 2).await;
+    let challenger = TestNode::new(registry.clone(), 0xC0, 1, 2).await;
+
+    main.node.observe_contact(incumbent.contact()).await;
+    main.node.observe_contact(challenger.contact()).await;
+
+    sleep(Duration::from_millis(20)).await;
+
+    let pings = main.network.ping_calls().await;
+    assert_eq!(pings, vec![incumbent.contact().id]);
 }
