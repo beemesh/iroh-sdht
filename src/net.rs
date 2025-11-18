@@ -6,7 +6,7 @@ use irpc::Client;
 
 use crate::core::{Contact, DhtNetwork, Key, NodeId};
 use crate::protocol::{
-    DhtProtocol, FindNodeRequest, FindValueRequest, FindValueResponse, StoreRequest,
+    DhtProtocol, FindNodeRequest, FindValueRequest, FindValueResponse, PingRequest, StoreRequest,
 };
 
 pub const DHT_ALPN: &[u8] = b"myapp/dht/1";
@@ -62,6 +62,16 @@ impl DhtNetwork for IrohNetwork {
                 from: self.self_contact.clone(),
                 key,
                 value,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn ping(&self, to: &Contact) -> Result<()> {
+        let client = self.client(to)?;
+        client
+            .rpc(PingRequest {
+                from: self.self_contact.clone(),
             })
             .await?;
         Ok(())

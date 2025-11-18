@@ -7,6 +7,7 @@ use iroh_blake3::Hasher;
 use rand::RngCore;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
+use tracing::debug;
 
 /// 256-bit IDs for nodes and keys
 pub type NodeId = [u8; 32];
@@ -687,6 +688,23 @@ struct Bucket {
     contacts: Vec<Contact>,
 }
 
+#[derive(Debug)]
+enum BucketTouchOutcome {
+    Inserted,
+    Refreshed,
+    Full {
+        new_contact: Contact,
+        oldest: Contact,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PendingBucketUpdate {
+    bucket_index: usize,
+    oldest: Contact,
+    new_contact: Contact,
+}
+
 impl Bucket {
     fn new() -> Self {
         Self {
@@ -694,18 +712,45 @@ impl Bucket {
         }
     }
 
-    fn touch(&mut self, contact: Contact, k: usize) {
+    fn touch(&mut self, contact: Contact, k: usize) -> BucketTouchOutcome {
         if let Some(pos) = self.contacts.iter().position(|c| c.id == contact.id) {
             let existing = self.contacts.remove(pos);
             self.contacts.push(existing);
-            return;
+            return BucketTouchOutcome::Refreshed;
         }
 
         if self.contacts.len() < k {
             self.contacts.push(contact);
+            BucketTouchOutcome::Inserted
         } else {
-            // Real Kademlia would ping the oldest before evicting.
-            // For simplicity we just drop the new one here.
+            let oldest = self
+                .contacts
+                .first()
+                .cloned()
+                .expect("bucket cannot be empty when full");
+            BucketTouchOutcome::Full {
+                new_contact: contact,
+                oldest,
+            }
+        }
+    }
+
+    fn refresh(&mut self, id: &NodeId) -> bool {
+        if let Some(pos) = self.contacts.iter().position(|c| &c.id == id) {
+            let existing = self.contacts.remove(pos);
+            self.contacts.push(existing);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove(&mut self, id: &NodeId) -> bool {
+        if let Some(pos) = self.contacts.iter().position(|c| &c.id == id) {
+            self.contacts.remove(pos);
+            true
+        } else {
+            false
         }
     }
 }
@@ -743,11 +788,25 @@ impl RoutingTable {
     }
 
     pub fn update(&mut self, contact: Contact) {
+        let _ = self.update_with_pending(contact);
+    }
+
+    fn update_with_pending(&mut self, contact: Contact) -> Option<PendingBucketUpdate> {
         if contact.id == self.self_id {
-            return;
+            return None;
         }
         let idx = bucket_index(&self.self_id, &contact.id);
-        self.buckets[idx].touch(contact, self.k);
+        match self.buckets[idx].touch(contact, self.k) {
+            BucketTouchOutcome::Inserted | BucketTouchOutcome::Refreshed => None,
+            BucketTouchOutcome::Full {
+                new_contact,
+                oldest,
+            } => Some(PendingBucketUpdate {
+                bucket_index: idx,
+                oldest,
+                new_contact,
+            }),
+        }
     }
 
     pub fn closest(&self, target: &NodeId, k: usize) -> Vec<Contact> {
@@ -768,6 +827,26 @@ impl RoutingTable {
         }
         all
     }
+
+    fn apply_ping_result(&mut self, pending: PendingBucketUpdate, oldest_alive: bool) {
+        let bucket = &mut self.buckets[pending.bucket_index];
+        if oldest_alive {
+            bucket.refresh(&pending.oldest.id);
+            return;
+        }
+
+        let _ = bucket.remove(&pending.oldest.id);
+        let already_present = bucket
+            .contacts
+            .iter()
+            .any(|contact| contact.id == pending.new_contact.id);
+        if already_present {
+            return;
+        }
+        if bucket.contacts.len() < self.k {
+            bucket.contacts.push(pending.new_contact);
+        }
+    }
 }
 
 /// Network abstraction used by the core.
@@ -780,6 +859,13 @@ pub trait DhtNetwork: Send + Sync + 'static {
     async fn find_value(&self, to: &Contact, key: Key) -> Result<(Option<Vec<u8>>, Vec<Contact>)>;
 
     async fn store(&self, to: &Contact, key: Key, value: Vec<u8>) -> Result<()>;
+
+    /// Check whether the given peer is still responsive.
+    ///
+    /// Implementations should wire this into their Ping RPC so that routing
+    /// bucket refreshes can follow the "ping-before-evict" rule from the
+    /// Kademlia paper.
+    async fn ping(&self, to: &Contact) -> Result<()>;
 }
 
 /// High level state machine that drives the adaptive Kademlia algorithm.
@@ -841,9 +927,14 @@ impl<N: DhtNetwork> DhtNode<N> {
             let params = self.params.lock().await;
             params.current_k()
         };
-        let mut rt = self.routing.lock().await;
-        rt.set_k(k);
-        rt.update(contact);
+        let pending = {
+            let mut rt = self.routing.lock().await;
+            rt.set_k(k);
+            rt.update_with_pending(contact)
+        };
+        if let Some(update) = pending {
+            self.spawn_bucket_refresh(update);
+        }
     }
 
     async fn store_local(&self, key: Key, value: Vec<u8>) {
@@ -858,6 +949,26 @@ impl<N: DhtNetwork> DhtNode<N> {
         if !spilled.is_empty() {
             self.offload_spilled(spilled).await;
         }
+    }
+
+    fn spawn_bucket_refresh(&self, pending: PendingBucketUpdate) {
+        let network = self.network.clone();
+        let routing = self.routing.clone();
+        tokio::spawn(async move {
+            let alive = match network.ping(&pending.oldest).await {
+                Ok(_) => true,
+                Err(err) => {
+                    debug!(
+                        peer = ?pending.oldest.id,
+                        addr = %pending.oldest.addr,
+                        "ping failed: {err:?}"
+                    );
+                    false
+                }
+            };
+            let mut rt = routing.lock().await;
+            rt.apply_ping_result(pending, alive);
+        });
     }
 
     async fn get_local(&self, key: &Key) -> Option<Vec<u8>> {

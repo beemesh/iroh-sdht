@@ -14,6 +14,7 @@ pub struct TestNetwork {
     latencies: Arc<Mutex<HashMap<NodeId, Duration>>>,
     failures: Arc<Mutex<HashSet<NodeId>>>,
     stores: Arc<Mutex<Vec<(Contact, Key, usize)>>>,
+    pings: Arc<Mutex<Vec<NodeId>>>,
 }
 
 impl TestNetwork {
@@ -24,6 +25,7 @@ impl TestNetwork {
             latencies: Arc::new(Mutex::new(HashMap::new())),
             failures: Arc::new(Mutex::new(HashSet::new())),
             stores: Arc::new(Mutex::new(Vec::new())),
+            pings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -44,6 +46,11 @@ impl TestNetwork {
     pub async fn store_calls(&self) -> Vec<(Contact, Key, usize)> {
         let stores = self.stores.lock().await;
         stores.clone()
+    }
+
+    pub async fn ping_calls(&self) -> Vec<NodeId> {
+        let calls = self.pings.lock().await;
+        calls.clone()
     }
 }
 
@@ -108,6 +115,22 @@ impl DhtNetwork for TestNetwork {
                 .await;
         }
         Ok(())
+    }
+
+    async fn ping(&self, to: &Contact) -> Result<()> {
+        if self.should_fail(&to.id).await {
+            return Err(anyhow!("injected network failure"));
+        }
+        self.maybe_sleep(&to.id).await;
+        {
+            let mut calls = self.pings.lock().await;
+            calls.push(to.id);
+        }
+        if self.registry.get(&to.id).await.is_some() {
+            Ok(())
+        } else {
+            Err(anyhow!("peer not reachable"))
+        }
     }
 }
 
