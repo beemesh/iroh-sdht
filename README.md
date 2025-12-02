@@ -144,6 +144,7 @@ Contacts are dynamically assigned to latency tiers:
 ### Backpressure & Storage
 
 - **LRU cache** with O(1) operations (get, put, eviction)
+- **TTL expiration** - entries expire after 24 hours (per Kademlia spec)
 - **Pressure monitoring** based on memory, disk, and request rate
 - **Automatic eviction** when pressure exceeds threshold (0.8)
 - **Content verification** using BLAKE3 hash
@@ -168,6 +169,8 @@ Contacts are dynamically assigned to latency tiers:
 | `TIERING_RECOMPUTE_INTERVAL` | 30s | Tier recomputation frequency |
 | `PRESSURE_THRESHOLD` | 0.8 | Eviction trigger threshold |
 | `LOCAL_STORE_MAX_ENTRIES` | 100,000 | Maximum LRU cache entries |
+| `DEFAULT_TTL` | 24h | Data expiration time (per Kademlia spec) |
+| `EXPIRATION_CHECK_INTERVAL` | 60s | How often expired entries are cleaned up |
 
 ---
 

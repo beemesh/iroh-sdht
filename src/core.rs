@@ -79,6 +79,12 @@ const PRESSURE_THRESHOLD: f32 = 0.75;
 /// Sliding window size for tracking RPC success/failure for adaptive `k`.
 const QUERY_STATS_WINDOW: usize = 100;
 
+/// Default TTL for stored data (24 hours, per Kademlia spec).
+const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often to run the expiration cleanup task.
+const EXPIRATION_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 // ============================================================================
 // Hashing Functions
 // ============================================================================
@@ -634,24 +640,40 @@ impl PressureMonitor {
 /// This is a reasonable default; pressure-based eviction may kick in earlier.
 const LOCAL_STORE_MAX_ENTRIES: usize = 100_000;
 
+/// A stored entry with its value and expiration timestamp.
+#[derive(Clone)]
+struct StoredEntry {
+    /// The stored value.
+    value: Vec<u8>,
+    /// When this entry expires and should be deleted.
+    expires_at: Instant,
+}
+
 /// Local key-value store using LRU eviction with pressure-based adaptive behavior.
 ///
 /// Uses an O(1) LRU cache for efficient storage operations and integrates with
 /// pressure monitoring for adaptive eviction under resource constraints.
+/// Entries automatically expire after [`DEFAULT_TTL`] (24 hours).
 struct LocalStore {
     /// LRU cache providing O(1) get, put, and eviction operations.
-    cache: LruCache<Key, Vec<u8>>,
+    cache: LruCache<Key, StoredEntry>,
     /// Pressure monitor for adaptive resource management.
     pressure: PressureMonitor,
+    /// TTL for new entries.
+    ttl: Duration,
+    /// Last time expiration cleanup was run.
+    last_expiration_check: Instant,
 }
 
 impl LocalStore {
-    /// Create a new local store with default capacity.
+    /// Create a new local store with default capacity and TTL.
     fn new() -> Self {
         let cap = NonZeroUsize::new(LOCAL_STORE_MAX_ENTRIES).expect("capacity must be non-zero");
         Self {
             cache: LruCache::new(cap),
             pressure: PressureMonitor::new(),
+            ttl: DEFAULT_TTL,
+            last_expiration_check: Instant::now(),
         }
     }
 
@@ -665,6 +687,7 @@ impl LocalStore {
     /// Record an incoming request for rate limiting purposes.
     fn record_request(&mut self) {
         self.pressure.record_request();
+        self.maybe_expire_entries();
         let len = self.cache.len();
         self.pressure.update_pressure(len);
     }
@@ -673,16 +696,20 @@ impl LocalStore {
     ///
     /// Returns a list of key-value pairs that were evicted due to pressure.
     /// The LRU cache automatically handles capacity-based eviction.
+    /// Entries expire after [`DEFAULT_TTL`] (24 hours).
     fn store(&mut self, key: Key, value: &[u8]) -> Vec<(Key, Vec<u8>)> {
         // If key exists, remove it first to update pressure accounting
         if let Some(existing) = self.cache.pop(&key) {
-            self.pressure.record_evict(existing.len());
+            self.pressure.record_evict(existing.value.len());
         }
 
-        let data = value.to_vec();
-        self.pressure.record_store(data.len());
+        let entry = StoredEntry {
+            value: value.to_vec(),
+            expires_at: Instant::now() + self.ttl,
+        };
+        self.pressure.record_store(entry.value.len());
         // put() is O(1) and automatically handles LRU eviction at capacity
-        self.cache.put(key, data);
+        self.cache.put(key, entry);
         self.pressure.update_pressure(self.cache.len());
 
         // Pressure-based eviction: evict LRU entries until pressure is acceptable
@@ -690,10 +717,10 @@ impl LocalStore {
         let mut spill_happened = false;
         while self.pressure.current_pressure() > PRESSURE_THRESHOLD {
             // pop_lru() is O(1)
-            if let Some((evicted_key, evicted_val)) = self.cache.pop_lru() {
-                self.pressure.record_evict(evicted_val.len());
+            if let Some((evicted_key, evicted_entry)) = self.cache.pop_lru() {
+                self.pressure.record_evict(evicted_entry.value.len());
                 self.pressure.update_pressure(self.cache.len());
-                spilled.push((evicted_key, evicted_val));
+                spilled.push((evicted_key, evicted_entry.value));
                 spill_happened = true;
             } else {
                 break;
@@ -706,9 +733,52 @@ impl LocalStore {
     }
 
     /// Get a value by key, promoting it to most-recently-used in O(1) time.
+    ///
+    /// Returns `None` if the key doesn't exist or has expired.
     fn get(&mut self, key: &Key) -> Option<Vec<u8>> {
-        // get() is O(1) and automatically promotes the key to most-recently-used
-        self.cache.get(key).cloned()
+        let now = Instant::now();
+        // Check if entry exists and is not expired
+        if let Some(entry) = self.cache.get(key) {
+            if now < entry.expires_at {
+                return Some(entry.value.clone());
+            }
+            // Entry has expired, remove it
+            if let Some(expired) = self.cache.pop(key) {
+                self.pressure.record_evict(expired.value.len());
+            }
+        }
+        None
+    }
+
+    /// Remove expired entries from the cache.
+    ///
+    /// Called periodically during requests to clean up stale data.
+    fn maybe_expire_entries(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_expiration_check) < EXPIRATION_CHECK_INTERVAL {
+            return;
+        }
+        self.last_expiration_check = now;
+
+        // Collect expired keys (we can't modify while iterating)
+        let expired_keys: Vec<Key> = self
+            .cache
+            .iter()
+            .filter_map(|(key, entry)| {
+                if now >= entry.expires_at {
+                    Some(*key)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove expired entries
+        for key in expired_keys {
+            if let Some(entry) = self.cache.pop(&key) {
+                self.pressure.record_evict(entry.value.len());
+            }
+        }
     }
 
     /// Get the current pressure score.
