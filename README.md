@@ -25,18 +25,18 @@ This crate provides a lightweight, embeddable distributed hash table for iroh-ba
 
 ## Installation
 
-Add to your \`Cargo.toml\`:
+Add to your `Cargo.toml`:
 
-\`\`\`toml
+```toml
 [dependencies]
 iroh_sdht = "0.1"
-\`\`\`
+```
 
 ---
 
 ## Quick Start
 
-\`\`\`rust
+```rust
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr};
 use iroh::protocol::Router;
@@ -76,7 +76,7 @@ async fn launch(endpoint: Endpoint, addr: EndpointAddr) -> Result<()> {
 
     Ok(())
 }
-\`\`\`
+```
 
 ---
 
@@ -86,14 +86,14 @@ async fn launch(endpoint: Endpoint, addr: EndpointAddr) -> Result<()> {
 
 | Module | Description |
 |--------|-------------|
-| \`core\` | Transport-agnostic DHT logic: routing table, storage, tiering, adaptive parameters |
-| \`net\` | iroh-based \`DhtNetwork\` implementation using QUIC transport |
-| \`protocol\` | RPC message definitions for \`irpc\` framework |
-| \`server\` | Protocol handler for integrating with iroh's \`Router\` |
+| `core` | Transport-agnostic DHT logic: routing table, storage, tiering, adaptive parameters |
+| `net` | iroh-based `DhtNetwork` implementation using QUIC transport |
+| `protocol` | RPC message definitions for `irpc` framework |
+| `server` | Protocol handler for integrating with iroh's `Router` |
 
 ### Public API
 
-\`\`\`rust
+```rust
 // Types and helpers
 pub use core::{
     derive_node_id,      // Hash bytes to NodeId using BLAKE3
@@ -110,7 +110,7 @@ pub use core::{
 // Network and server
 pub use net::{IrohNetwork, DHT_ALPN};
 pub use server::DhtProtocolHandler;
-\`\`\`
+```
 
 ---
 
@@ -120,10 +120,10 @@ pub use server::DhtProtocolHandler;
 
 The DHT uses 256-bit identifiers:
 
-\`\`\`rust
+```rust
 type NodeId = [u8; 32];  // Node identifier (BLAKE3 hash of public key)
 type Key = [u8; 32];     // Content key (BLAKE3 hash of value)
-\`\`\`
+```
 
 ### Routing Table
 
@@ -161,13 +161,13 @@ Contacts are dynamically assigned to latency tiers:
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| \`K_DEFAULT\` | 20 | Default bucket size |
-| \`ALPHA_DEFAULT\` | 3 | Default lookup parallelism |
-| \`MIN_LATENCY_TIERS\` | 2 | Minimum number of latency tiers |
-| \`MAX_LATENCY_TIERS\` | 5 | Maximum number of latency tiers |
-| \`TIERING_RECOMPUTE_INTERVAL\` | 30s | Tier recomputation frequency |
-| \`PRESSURE_THRESHOLD\` | 0.8 | Eviction trigger threshold |
-| \`LOCAL_STORE_MAX_ENTRIES\` | 100,000 | Maximum LRU cache entries |
+| `K_DEFAULT` | 20 | Default bucket size |
+| `ALPHA_DEFAULT` | 3 | Default lookup parallelism |
+| `MIN_LATENCY_TIERS` | 2 | Minimum number of latency tiers |
+| `MAX_LATENCY_TIERS` | 5 | Maximum number of latency tiers |
+| `TIERING_RECOMPUTE_INTERVAL` | 30s | Tier recomputation frequency |
+| `PRESSURE_THRESHOLD` | 0.8 | Eviction trigger threshold |
+| `LOCAL_STORE_MAX_ENTRIES` | 100,000 | Maximum LRU cache entries |
 
 ---
 
@@ -175,24 +175,24 @@ Contacts are dynamically assigned to latency tiers:
 
 ### ALPN
 
-\`\`\`rust
+```rust
 pub const DHT_ALPN: &[u8] = b"myapp/dht/1";
-\`\`\`
+```
 
 ### RPC Messages
 
 | Request | Response | Description |
 |---------|----------|-------------|
-| \`FindNodeRequest\` | \`Vec<Contact>\` | Find k closest nodes to target |
-| \`FindValueRequest\` | \`FindValueResponse\` | Get value or closer nodes |
-| \`StoreRequest\` | \`()\` | Store key-value pair |
-| \`PingRequest\` | \`()\` | Check node responsiveness |
+| `FindNodeRequest` | `Vec<Contact>` | Find k closest nodes to target |
+| `FindValueRequest` | `FindValueResponse` | Get value or closer nodes |
+| `StoreRequest` | `()` | Store key-value pair |
+| `PingRequest` | `()` | Check node responsiveness |
 
 ---
 
 ## Telemetry
 
-\`\`\`rust
+```rust
 #[derive(Clone, Debug, Default)]
 pub struct TelemetrySnapshot {
     pub tier_centroids: Vec<f32>,    // Latency tier centers (ms)
@@ -205,7 +205,7 @@ pub struct TelemetrySnapshot {
 
 // Get a snapshot
 let snapshot = dht.telemetry_snapshot().await;
-\`\`\`
+```
 
 ---
 
@@ -213,9 +213,9 @@ let snapshot = dht.telemetry_snapshot().await;
 
 The included example binary demonstrates a complete DHT node:
 
-\`\`\`bash
+```bash
 cargo run
-\`\`\`
+```
 
 This starts a node with:
 - mDNS discovery for local network peers
@@ -223,19 +223,19 @@ This starts a node with:
 - Periodic telemetry logging (every 5 minutes)
 
 Output:
-\`\`\`
+```
 DHT node started
   NodeId (hex): a1b2c3d4...
   Endpoint addr JSON: {"node_id":"...","direct_addresses":[...]}
 mDNS discovery enabled; will fall back to relay if unavailable
 Telemetry: pressure=0.00, stored_keys=0, tiers=[0], centroids=[150.0], k=20, alpha=3
-\`\`\`
+```
 
 ---
 
 ## Testing
 
-\`\`\`bash
+```bash
 # Run all tests
 cargo test
 
@@ -244,7 +244,7 @@ cargo test -- --nocapture
 
 # Run specific test
 cargo test iterative_find_node
-\`\`\`
+```
 
 ---
 
@@ -252,11 +252,11 @@ cargo test iterative_find_node
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| \`iroh\` | 0.95.1 | QUIC transport with discovery |
-| \`irpc\` / \`irpc-iroh\` | 0.11 | RPC framework |
-| \`iroh-blake3\` | 1.4 | BLAKE3 hashing |
-| \`tokio\` | 1.x | Async runtime |
-| \`lru\` | 0.12 | O(1) LRU cache |
+| `iroh` | 0.95.1 | QUIC transport with discovery |
+| `irpc` / `irpc-iroh` | 0.11 | RPC framework |
+| `iroh-blake3` | 1.4 | BLAKE3 hashing |
+| `tokio` | 1.x | Async runtime |
+| `lru` | 0.12 | O(1) LRU cache |
 
 ---
 
