@@ -9,15 +9,15 @@
 //! The crate is split into a handful of modules that can be reused
 //! independently:
 //!
-//! - [`core`]: the transport-agnostic Kademlia logic, including the routing
-//!   table, local storage engine, and [`DhtNode`] state machine.
+//! - `core`: the transport-agnostic Kademlia logic, including the routing
+//!   table, local storage engine, and the internal DHT state machine.
 //! - [`net`]: an [`iroh`] based [`DhtNetwork`] implementation that knows how to
 //!   exchange RPC messages over QUIC.
 //! - [`protocol`]: the [`irpc`](https://docs.rs/irpc) request/response
 //!   definitions shared by the client and server sides of the DHT RPCs.
 //! - [`server`]: utilities for hosting an RPC server on top of the network
-//!   transport using `irpc-iroh`'s [`irpc_iroh::IrohProtocol`] and iroh's [`Router`] and
-//!   [`ProtocolHandler`].
+//!   transport using `irpc-iroh`'s [`irpc_iroh::IrohProtocol`] and iroh's `Router` and
+//!   `ProtocolHandler`.
 //!
 //! ## Getting started
 //!
@@ -51,10 +51,10 @@
 //!
 //! The binary in `src/main.rs` demonstrates how to wire these pieces together:
 //!
-//! - The iroh [`Endpoint`] is configured with [`DHT_ALPN`] via
+//! - The iroh `Endpoint` is configured with [`DHT_ALPN`] via
 //!   `Endpoint::builder().alpns(...)`, matching the echo example's
 //!   `start_accept_side` guidance.
-//! - [`Router::builder`] installs [`DhtProtocolHandler`] as the accept-side entry
+//! - `Router::builder` installs [`DhtProtocolHandler`] as the accept-side entry
 //!   point for every QUIC connection that selects `DHT_ALPN`.
 //! - [`IrohNetwork`] uses `irpc-iroh` to lazily create QUIC connections per
 //!   peer and exchange length-prefixed, postcard-encoded messages.
@@ -63,10 +63,6 @@
 //!   request handlers.
 //!
 //! This example node discovers peers via mDNS with relay fallback.
-//!
-//! [`Router`]: iroh::protocol::Router
-//! [`ProtocolHandler`]: iroh::protocol::ProtocolHandler
-//! [`Endpoint`]: iroh::Endpoint
 
 pub(crate) mod core;
 pub mod net;

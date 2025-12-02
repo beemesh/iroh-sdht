@@ -1,3 +1,19 @@
+//! DHT protocol server for handling incoming RPC requests.
+//!
+//! This module provides the [`DhtProtocolHandler`] which integrates with iroh's
+//! router to handle incoming DHT protocol connections. It dispatches incoming
+//! RPC messages to the appropriate handlers on the [`DiscoveryNode`].
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let handler = DhtProtocolHandler::new(discovery_node);
+//! let router = Router::builder(endpoint.clone())
+//!     .accept(DHT_ALPN, handler)
+//!     .spawn()
+//!     .await?;
+//! ```
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -13,18 +29,21 @@ use crate::protocol::{
     StoreRequest,
 };
 
-/// The router entry point for inbound `DHT_ALPN` connections.
+/// Protocol handler for incoming DHT connections.
 ///
-/// `Router::builder(endpoint.clone()).accept(DHT_ALPN, DhtProtocolHandler::new(...))` mirrors
-/// the iroh echo example's `start_accept_side`: for each QUIC connection negotiated
-/// with our ALPN the router invokes [`ProtocolHandler::accept`], which in turn
-/// delegates to `irpc`'s [`IrohProtocol`] implementation backed by a lightweight actor.
+/// Integrates with iroh's Router to handle connections negotiated with the DHT ALPN.
+/// Each connection is handled by irpc's protocol machinery, which dispatches
+/// incoming RPC messages to a background actor that calls into the [`DiscoveryNode`].
 #[derive(Clone)]
 pub struct DhtProtocolHandler {
+    /// The irpc protocol handler that manages connection state.
     inner: Arc<IrohProtocol<DhtProtocol>>,
 }
 
 impl DhtProtocolHandler {
+    /// Create a new protocol handler backed by the given discovery node.
+    ///
+    /// Spawns a background task to process incoming RPC messages.
     pub fn new<N: DhtNetwork>(node: DiscoveryNode<N>) -> Self {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(run_server(node, rx));
@@ -42,6 +61,7 @@ impl fmt::Debug for DhtProtocolHandler {
 }
 
 impl ProtocolHandler for DhtProtocolHandler {
+    /// Accept an incoming connection and delegate to the irpc protocol handler.
     fn accept(
         &self,
         connection: Connection,
@@ -50,12 +70,14 @@ impl ProtocolHandler for DhtProtocolHandler {
     }
 }
 
+/// Background task that processes incoming RPC messages.
 async fn run_server<N: DhtNetwork>(node: DiscoveryNode<N>, mut inbox: mpsc::Receiver<DhtMessage>) {
     while let Ok(Some(msg)) = inbox.recv().await {
         handle_message(node.clone(), msg).await;
     }
 }
 
+/// Dispatch an incoming message to the appropriate handler.
 async fn handle_message<N: DhtNetwork>(node: DiscoveryNode<N>, msg: DhtMessage) {
     match msg {
         DhtMessage::FindNode(request) => handle_find_node(node.clone(), request).await,
@@ -65,6 +87,7 @@ async fn handle_message<N: DhtNetwork>(node: DiscoveryNode<N>, msg: DhtMessage) 
     }
 }
 
+/// Handle a FIND_NODE RPC request.
 async fn handle_find_node<N: DhtNetwork>(
     node: DiscoveryNode<N>,
     request: WithChannels<FindNodeRequest, DhtProtocol>,
@@ -76,6 +99,7 @@ async fn handle_find_node<N: DhtNetwork>(
     let _ = tx.send(nodes).await;
 }
 
+/// Handle a FIND_VALUE RPC request.
 async fn handle_find_value<N: DhtNetwork>(
     node: DiscoveryNode<N>,
     request: WithChannels<FindValueRequest, DhtProtocol>,
@@ -86,6 +110,7 @@ async fn handle_find_value<N: DhtNetwork>(
     let _ = tx.send(response).await;
 }
 
+/// Handle a STORE RPC request.
 async fn handle_store<N: DhtNetwork>(
     node: DiscoveryNode<N>,
     request: WithChannels<StoreRequest, DhtProtocol>,
@@ -96,6 +121,7 @@ async fn handle_store<N: DhtNetwork>(
     let _ = tx.send(()).await;
 }
 
+/// Handle a PING RPC request.
 async fn handle_ping(request: WithChannels<PingRequest, DhtProtocol>) {
     let WithChannels { tx, .. } = request;
     let _ = tx.send(()).await;
