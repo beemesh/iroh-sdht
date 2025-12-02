@@ -1,6 +1,6 @@
 [package]
 name = "iroh_sdht"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A Kademlia-inspired, latency-aware sloppy DHT with adaptive tiering and backpressure controls"
 license = "MIT OR Apache-2.0"
