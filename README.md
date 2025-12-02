@@ -279,11 +279,6 @@ cargo test iterative_find_node
 | `tracing` | 0.1 | Structured logging |
 | `tracing-subscriber` | 0.3 | Log output formatting |
 
----
-
-## License
-
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 ---
 
