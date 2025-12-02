@@ -798,12 +798,13 @@ impl LocalStore {
 
 /// Adaptive parameters for DHT operations based on network conditions.
 ///
-/// Dynamically adjusts k (bucket size) based on observed churn rate to maintain
-/// routing table health in varying network conditions.
+/// Dynamically adjusts:
+/// - **k** (bucket size): 10-30, increases with churn rate for routing resilience
+/// - **α** (parallelism): 2-5, increases with failure rate to improve lookup success
 struct AdaptiveParams {
     /// Current k parameter (bucket size), ranges from 10 to 30.
     k: usize,
-    /// Parallelism factor for lookups.
+    /// Parallelism factor for lookups, ranges from 2 to 5.
     alpha: usize,
     /// Sliding window of recent churn observations (true = success, false = failure).
     churn_history: VecDeque<bool>,
@@ -814,12 +815,12 @@ impl AdaptiveParams {
     fn new(k: usize, alpha: usize) -> Self {
         Self {
             k,
-            alpha,
+            alpha: alpha.clamp(2, 5),
             churn_history: VecDeque::new(),
         }
     }
 
-    /// Record a churn observation and update k if needed.
+    /// Record a churn observation and update k and alpha if needed.
     ///
     /// Returns true if k was changed.
     fn record_churn(&mut self, success: bool) -> bool {
@@ -829,6 +830,7 @@ impl AdaptiveParams {
         }
         let old_k = self.k;
         self.update_k();
+        self.update_alpha();
         old_k != self.k
     }
 
@@ -844,6 +846,21 @@ impl AdaptiveParams {
         let churn_rate = failures as f32 / self.churn_history.len() as f32;
         let new_k = (10.0 + (20.0 * churn_rate).round()).clamp(10.0, 30.0);
         self.k = new_k as usize;
+    }
+
+    /// Recompute alpha based on observed failure rate.
+    ///
+    /// Higher failure rates result in larger alpha values to improve lookup success
+    /// by querying more nodes in parallel. Alpha ranges from 2 (healthy) to 5 (degraded).
+    fn update_alpha(&mut self) {
+        if self.churn_history.is_empty() {
+            return;
+        }
+        let failures = self.churn_history.iter().filter(|entry| !**entry).count();
+        let failure_rate = failures as f32 / self.churn_history.len() as f32;
+        // α = 2 at 0% failures, α = 5 at 100% failures
+        let new_alpha = (2.0 + (3.0 * failure_rate).round()).clamp(2.0, 5.0);
+        self.alpha = new_alpha as usize;
     }
 
     /// Get the current k parameter.
@@ -1442,7 +1459,7 @@ impl<N: DhtNetwork> DhtNode<N> {
             // Select up to alpha unqueried candidates
             let candidates: Vec<Contact> = shortlist
                 .iter()
-                .filter(|c| !queried.contains(&c.id))
+                .filter(|c| !queried.contains(&c.id) && c.id != self.id)
                 .take(alpha)
                 .cloned()
                 .collect();
@@ -1451,61 +1468,72 @@ impl<N: DhtNetwork> DhtNode<N> {
                 break;
             }
 
+            // Mark all candidates as queried before parallel execution
+            for c in &candidates {
+                queried.insert(c.id);
+            }
+
+            // Query alpha contacts in parallel
+            let network = self.network.clone();
+            let futures: Vec<_> = candidates
+                .into_iter()
+                .map(|contact| {
+                    let net = network.clone();
+                    async move {
+                        let start = Instant::now();
+                        let result = net.find_node(&contact, target).await;
+                        (contact, start.elapsed(), result)
+                    }
+                })
+                .collect();
+
+            let results = futures::future::join_all(futures).await;
+
             let mut any_closer = false;
 
-            for contact in candidates {
-                queried.insert(contact.id);
-
-                if contact.id == self.id {
-                    continue;
-                }
-
-                // Query the contact and measure RTT
-                let start = Instant::now();
-                let response = match self.network.find_node(&contact, target).await {
+            // Process all parallel results
+            for (contact, elapsed, result) in results {
+                match result {
                     Ok(nodes) => {
                         rpc_success = true;
-                        let elapsed = start.elapsed();
                         self.record_rtt(&contact, elapsed).await;
                         self.observe_contact(contact.clone()).await;
                         for n in &nodes {
                             self.observe_contact(n.clone()).await;
                         }
-                        nodes
+
+                        // Add new contacts to shortlist
+                        for n in nodes {
+                            if seen.insert(n.id) && self.level_matches(&n.id, level_filter).await {
+                                shortlist.push(n);
+                            }
+                        }
                     }
                     Err(_) => {
                         rpc_failure = true;
-                        continue;
-                    }
-                };
-
-                // Add new contacts to shortlist
-                for n in response {
-                    if seen.insert(n.id) && self.level_matches(&n.id, level_filter).await {
-                        shortlist.push(n.clone());
                     }
                 }
+            }
 
-                // Re-sort shortlist by distance to target
-                shortlist.sort_by(|a, b| {
-                    let da = xor_distance(&a.id, &target);
-                    let db = xor_distance(&b.id, &target);
-                    distance_cmp(&da, &db)
-                });
+            // Re-sort shortlist by distance to target
+            shortlist.sort_by(|a, b| {
+                let da = xor_distance(&a.id, &target);
+                let db = xor_distance(&b.id, &target);
+                distance_cmp(&da, &db)
+            });
 
-                // Truncate to k closest
-                let k = self.current_k().await;
-                if shortlist.len() > k {
-                    shortlist.truncate(k);
-                }
+            // Truncate to k closest
+            let k = self.current_k().await;
+            if shortlist.len() > k {
+                shortlist.truncate(k);
+            }
 
-                // Check if we found any closer contacts
-                if let Some(first) = shortlist.first() {
-                    let new_best = xor_distance(&first.id, &target);
-                    if distance_cmp(&new_best, &best_distance) == std::cmp::Ordering::Less {
-                        best_distance = new_best;
-                        any_closer = true;
-                    }
+            // Check if we found any closer contacts
+            if let Some(first) = shortlist.first() {
+                let new_best = xor_distance(&first.id, &target);
+                if distance_cmp(&new_best, &best_distance) == std::cmp::Ordering::Less {
+                    best_distance = new_best;
+                    any_closer = true;
                 }
             }
 
