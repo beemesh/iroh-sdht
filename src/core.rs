@@ -20,7 +20,7 @@ use iroh_blake3::Hasher;
 use lru::LruCache;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 // ============================================================================
 // Type Aliases
@@ -376,6 +376,12 @@ impl TieringManager {
             .collect();
 
         // Remove stale data from all maps
+        if !stale_nodes.is_empty() {
+            debug!(
+                stale_count = stale_nodes.len(),
+                "cleaning up stale tiering data"
+            );
+        }
         for node in stale_nodes {
             self.assignments.remove(&node);
             self.samples.remove(&node);
@@ -769,6 +775,11 @@ impl LocalStore {
             }
         }
         if spill_happened {
+            warn!(
+                spilled_count = spilled.len(),
+                pressure = self.pressure.current_pressure(),
+                "pressure-based eviction triggered"
+            );
             self.pressure.record_spill();
         }
         spilled
@@ -816,6 +827,12 @@ impl LocalStore {
             .collect();
 
         // Remove expired entries
+        if !expired_keys.is_empty() {
+            debug!(
+                expired_count = expired_keys.len(),
+                "removing expired entries"
+            );
+        }
         for key in expired_keys {
             if let Some(entry) = self.cache.pop(&key) {
                 self.pressure.record_evict(entry.value.len());
@@ -871,8 +888,18 @@ impl AdaptiveParams {
             self.churn_history.pop_front();
         }
         let old_k = self.k;
+        let old_alpha = self.alpha;
         self.update_k();
         self.update_alpha();
+        if old_k != self.k || old_alpha != self.alpha {
+            info!(
+                old_k = old_k,
+                new_k = self.k,
+                old_alpha = old_alpha,
+                new_alpha = self.alpha,
+                "adaptive parameters changed"
+            );
+        }
         old_k != self.k
     }
 
@@ -1591,6 +1618,13 @@ impl<N: DhtNetwork> DhtNode<N> {
         } else if rpc_failure {
             self.adjust_k(false).await;
         }
+
+        debug!(
+            target = ?hex::encode(&target[..8]),
+            found = shortlist.len(),
+            queried = queried.len(),
+            "iterative lookup completed"
+        );
 
         Ok(shortlist)
     }

@@ -25,4 +25,5 @@ clap = { version = "4.5", features = ["derive"] }
 irpc = "0.11"
 irpc-iroh = "0.11"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lru = "0.12"

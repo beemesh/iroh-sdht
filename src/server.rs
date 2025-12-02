@@ -22,6 +22,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use irpc::channel::mpsc;
 use irpc::WithChannels;
 use irpc_iroh::IrohProtocol;
+use tracing::{debug, trace};
 
 use crate::core::{DhtNetwork, DiscoveryNode};
 use crate::protocol::{
@@ -93,9 +94,19 @@ async fn handle_find_node<N: DhtNetwork>(
     request: WithChannels<FindNodeRequest, DhtProtocol>,
 ) {
     let WithChannels { inner, tx, .. } = request;
+    trace!(
+        from = ?hex::encode(&inner.from.id[..8]),
+        target = ?hex::encode(&inner.target[..8]),
+        "handling FIND_NODE request"
+    );
     let nodes = node
         .handle_find_node_request(&inner.from, inner.target)
         .await;
+    debug!(
+        from = ?hex::encode(&inner.from.id[..8]),
+        returned = nodes.len(),
+        "FIND_NODE response"
+    );
     let _ = tx.send(nodes).await;
 }
 
@@ -105,7 +116,19 @@ async fn handle_find_value<N: DhtNetwork>(
     request: WithChannels<FindValueRequest, DhtProtocol>,
 ) {
     let WithChannels { inner, tx, .. } = request;
+    trace!(
+        from = ?hex::encode(&inner.from.id[..8]),
+        key = ?hex::encode(&inner.key[..8]),
+        "handling FIND_VALUE request"
+    );
     let (value, closer) = node.handle_find_value_request(&inner.from, inner.key).await;
+    let found = value.is_some();
+    debug!(
+        from = ?hex::encode(&inner.from.id[..8]),
+        found = found,
+        closer_nodes = closer.len(),
+        "FIND_VALUE response"
+    );
     let response = FindValueResponse { value, closer };
     let _ = tx.send(response).await;
 }
@@ -116,6 +139,12 @@ async fn handle_store<N: DhtNetwork>(
     request: WithChannels<StoreRequest, DhtProtocol>,
 ) {
     let WithChannels { inner, tx, .. } = request;
+    debug!(
+        from = ?hex::encode(&inner.from.id[..8]),
+        key = ?hex::encode(&inner.key[..8]),
+        value_len = inner.value.len(),
+        "handling STORE request"
+    );
     node.handle_store_request(&inner.from, inner.key, inner.value)
         .await;
     let _ = tx.send(()).await;
@@ -123,6 +152,10 @@ async fn handle_store<N: DhtNetwork>(
 
 /// Handle a PING RPC request.
 async fn handle_ping(request: WithChannels<PingRequest, DhtProtocol>) {
-    let WithChannels { tx, .. } = request;
+    let WithChannels { inner, tx, .. } = request;
+    trace!(
+        from = ?hex::encode(&inner.from.id[..8]),
+        "handling PING request"
+    );
     let _ = tx.send(()).await;
 }

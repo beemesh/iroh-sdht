@@ -7,7 +7,17 @@
 //! # Usage
 //!
 //! ```bash
+//! # Default (info level)
 //! cargo run
+//!
+//! # With debug logging
+//! RUST_LOG=debug cargo run
+//!
+//! # With trace logging (very verbose)
+//! RUST_LOG=trace cargo run
+//!
+//! # Filter to specific modules
+//! RUST_LOG=iroh_sdht=debug cargo run
 //! ```
 //!
 //! The node will start and print its NodeId and endpoint address. Telemetry
@@ -19,6 +29,8 @@ use iroh::discovery::mdns::MdnsDiscovery;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode};
 use tokio::time::{self, Duration};
+use tracing::{info, warn};
+use tracing_subscriber::{fmt, EnvFilter};
 
 use iroh_sdht::{
     derive_node_id, Contact, DhtProtocolHandler, DiscoveryNode, IrohNetwork, NodeId, DHT_ALPN,
@@ -36,6 +48,19 @@ fn endpoint_id_to_node_id(endpoint: &Endpoint) -> NodeId {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing subscriber with env filter
+    // Default to "info" level, can be overridden with RUST_LOG env var
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    
+    fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
+
     // Create an iroh endpoint with our DHT ALPN.
     // Peers connecting with this ALPN will be routed to our DhtProtocolHandler.
     let endpoint = Endpoint::builder()
@@ -46,9 +71,9 @@ async fn main() -> Result<()> {
 
     // Try to enable mDNS for local network discovery.
     if let Err(err) = enable_local_mdns(&endpoint) {
-        eprintln!("Failed to initialize mDNS discovery ({err:?}); continuing with relay-only mode");
+        warn!("Failed to initialize mDNS discovery: {err:?}; continuing with relay-only mode");
     } else {
-        println!("mDNS discovery enabled; will fall back to relay if unavailable");
+        info!("mDNS discovery enabled; will fall back to relay if unavailable");
     }
 
     // Derive our node ID from the endpoint's public key.
@@ -62,9 +87,9 @@ async fn main() -> Result<()> {
         addr: addr_json.clone(),
     };
 
-    println!("DHT node started");
-    println!("  NodeId (hex): {}", hex::encode(node_id));
-    println!("  Endpoint addr JSON: {}", addr_json);
+    info!("DHT node started");
+    info!(node_id = %hex::encode(node_id), "NodeId");
+    info!(addr = %addr_json, "Endpoint address");
 
     // Create the network layer and discovery node.
     let network = IrohNetwork {
@@ -79,21 +104,21 @@ async fn main() -> Result<()> {
         .accept(DHT_ALPN, DhtProtocolHandler::new(dht.clone()))
         .spawn();
 
-    // Spawn a background task to periodically print telemetry.
+    // Spawn a background task to periodically log telemetry.
     let telemetry_node = dht.clone();
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(300));
         loop {
             interval.tick().await;
             let snapshot = telemetry_node.telemetry_snapshot().await;
-            println!(
-                "Telemetry: pressure={:.2}, stored_keys={}, tiers={:?}, centroids={:?}, k={}, alpha={}",
-                snapshot.pressure,
-                snapshot.stored_keys,
-                snapshot.tier_counts,
-                snapshot.tier_centroids,
-                snapshot.replication_factor,
-                snapshot.concurrency,
+            info!(
+                pressure = format!("{:.2}", snapshot.pressure),
+                stored_keys = snapshot.stored_keys,
+                tier_counts = ?snapshot.tier_counts,
+                tier_centroids = ?snapshot.tier_centroids,
+                k = snapshot.replication_factor,
+                alpha = snapshot.concurrency,
+                "telemetry snapshot"
             );
         }
     });
