@@ -85,6 +85,10 @@ const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often to run the expiration cleanup task.
 const EXPIRATION_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Duration after which tiering data for a node is considered stale (24 hours).
+/// Nodes not seen within this period have their tiering data removed.
+const TIERING_STALE_THRESHOLD: Duration = Duration::from_secs(24 * 60 * 60);
+
 // ============================================================================
 // Hashing Functions
 // ============================================================================
@@ -221,6 +225,7 @@ pub struct TieringStats {
 /// 1. Collects RTT samples from RPC interactions
 /// 2. Periodically recomputes tier assignments using k-means
 /// 3. Assigns new contacts to a default middle tier
+/// 4. Cleans up stale data for nodes not seen in 24 hours
 ///
 /// This enables latency-aware routing where fast peers are preferred.
 struct TieringManager {
@@ -228,6 +233,8 @@ struct TieringManager {
     assignments: HashMap<NodeId, TieringLevel>,
     /// Rolling RTT samples per node (up to MAX_RTT_SAMPLES_PER_NODE).
     samples: HashMap<NodeId, VecDeque<f32>>,
+    /// Last time each node was observed (for stale data cleanup).
+    last_seen: HashMap<NodeId, Instant>,
     /// Current tier centroids in milliseconds (sorted fastest to slowest).
     centroids: Vec<f32>,
     /// Timestamp of last tier recomputation.
@@ -244,6 +251,7 @@ impl TieringManager {
         Self {
             assignments: HashMap::new(),
             samples: HashMap::new(),
+            last_seen: HashMap::new(),
             // Start with a single tier at 150ms as a reasonable default
             centroids: vec![150.0],
             last_recompute: Instant::now() - TIERING_RECOMPUTE_INTERVAL,
@@ -253,7 +261,9 @@ impl TieringManager {
     }
 
     /// Register a contact and assign it to the default tier if new.
+    /// Updates the last_seen timestamp for the node.
     fn register_contact(&mut self, node: &NodeId) -> TieringLevel {
+        self.last_seen.insert(*node, Instant::now());
         let default = self.default_level();
         *self.assignments.entry(*node).or_insert(default)
     }
@@ -298,14 +308,18 @@ impl TieringManager {
     /// Recompute tier assignments using k-means clustering if the recompute interval has elapsed.
     ///
     /// This method:
-    /// 1. Computes average RTT for each node from collected samples
-    /// 2. Runs dynamic k-means to find optimal tier centroids
-    /// 3. Reassigns all nodes to their closest tier
+    /// 1. Cleans up stale node data (not seen in 24 hours)
+    /// 2. Computes average RTT for each node from collected samples
+    /// 3. Runs dynamic k-means to find optimal tier centroids
+    /// 4. Reassigns all nodes to their closest tier
     fn recompute_if_needed(&mut self) {
         let now = Instant::now();
         if now.duration_since(self.last_recompute) < TIERING_RECOMPUTE_INTERVAL {
             return;
         }
+
+        // Clean up stale tiering data before recomputation
+        self.cleanup_stale(now);
 
         let per_node: Vec<(NodeId, f32)> = self
             .samples
@@ -339,6 +353,34 @@ impl TieringManager {
             self.centroids = centroids;
         }
         self.last_recompute = now;
+    }
+
+    /// Remove tiering data for nodes not seen within the stale threshold.
+    ///
+    /// This prevents unbounded memory growth from accumulating data for
+    /// nodes that have left the network or are no longer reachable.
+    fn cleanup_stale(&mut self, now: Instant) {
+        let cutoff = now - TIERING_STALE_THRESHOLD;
+
+        // Collect stale node IDs
+        let stale_nodes: Vec<NodeId> = self
+            .last_seen
+            .iter()
+            .filter_map(|(node, last)| {
+                if *last < cutoff {
+                    Some(*node)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove stale data from all maps
+        for node in stale_nodes {
+            self.assignments.remove(&node);
+            self.samples.remove(&node);
+            self.last_seen.remove(&node);
+        }
     }
 
     /// Get the default tier level (middle tier) for new nodes without samples.
