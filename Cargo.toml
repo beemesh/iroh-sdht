@@ -2,6 +2,13 @@
 name = "iroh_sdht"
 version = "0.1.0"
 edition = "2021"
+description = "A Kademlia-inspired, latency-aware sloppy DHT with adaptive tiering and backpressure controls"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/beemesh/iroh-sdht"
+readme = "README.md"
+keywords = ["dht", "kademlia", "iroh", "distributed", "p2p"]
+categories = ["network-programming"]
+authors = ["Flavio Aiello"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
