@@ -15,10 +15,14 @@ This crate provides a lightweight, embeddable distributed hash table for iroh-ba
 
 - **Kademlia-style routing** with 256 buckets and XOR distance metric
 - **Adaptive k parameter** (10-30) that adjusts based on network churn
+- **Adaptive α parameter** (2-5) that adjusts based on lookup success rate
+- **Parallel lookups** querying α nodes concurrently per round
 - **Latency-based tiering** using k-means clustering for peer prioritization
 - **Backpressure controls** with O(1) LRU eviction and pressure monitoring
+- **TTL expiration** with 24-hour data lifetime (per Kademlia spec)
 - **Content-addressed storage** using BLAKE3 hashing
 - **QUIC transport** via iroh with mDNS discovery and relay support
+- **Structured logging** via `tracing` with configurable log levels
 - **Telemetry snapshots** for monitoring and debugging
 
 ---
@@ -137,9 +141,10 @@ Kademlia-style routing with:
 
 Contacts are dynamically assigned to latency tiers:
 - **K-means clustering** on RTT samples (2-5 tiers)
-- **Periodic recomputation** every 30 seconds
+- **Periodic recomputation** every 5 minutes
 - **Tier-aware lookups** prioritizing fast peers
 - **Spill offloading** to slower tiers under pressure
+- **Stale data cleanup** removing nodes not seen in 24 hours
 
 ### Backpressure & Storage
 
@@ -166,8 +171,9 @@ Contacts are dynamically assigned to latency tiers:
 | `ALPHA_DEFAULT` | 3 | Default lookup parallelism |
 | `MIN_LATENCY_TIERS` | 2 | Minimum number of latency tiers |
 | `MAX_LATENCY_TIERS` | 5 | Maximum number of latency tiers |
-| `TIERING_RECOMPUTE_INTERVAL` | 30s | Tier recomputation frequency |
-| `PRESSURE_THRESHOLD` | 0.8 | Eviction trigger threshold |
+| `TIERING_RECOMPUTE_INTERVAL` | 5m | Tier recomputation frequency |
+| `TIERING_STALE_THRESHOLD` | 24h | When to remove stale tiering data |
+| `PRESSURE_THRESHOLD` | 0.75 | Eviction trigger threshold |
 | `LOCAL_STORE_MAX_ENTRIES` | 100,000 | Maximum LRU cache entries |
 | `DEFAULT_TTL` | 24h | Data expiration time (per Kademlia spec) |
 | `EXPIRATION_CHECK_INTERVAL` | 60s | How often expired entries are cleaned up |
@@ -217,21 +223,31 @@ let snapshot = dht.telemetry_snapshot().await;
 The included example binary demonstrates a complete DHT node:
 
 ```bash
+# Run with default (info) logging
 cargo run
+
+# Run with debug logging
+RUST_LOG=debug cargo run
+
+# Run with trace logging (very verbose)
+RUST_LOG=trace cargo run
+
+# Filter to specific modules
+RUST_LOG=iroh_sdht=debug cargo run
 ```
 
 This starts a node with:
 - mDNS discovery for local network peers
 - Relay fallback for NAT traversal
 - Periodic telemetry logging (every 5 minutes)
+- Structured logging via `tracing`
 
-Output:
+Example output:
 ```
-DHT node started
-  NodeId (hex): a1b2c3d4...
-  Endpoint addr JSON: {"node_id":"...","direct_addresses":[...]}
-mDNS discovery enabled; will fall back to relay if unavailable
-Telemetry: pressure=0.00, stored_keys=0, tiers=[0], centroids=[150.0], k=20, alpha=3
+2024-12-02T10:00:00Z  INFO iroh_sdht: DHT node started
+2024-12-02T10:00:00Z  INFO iroh_sdht: NodeId node_id="a1b2c3d4..."
+2024-12-02T10:00:00Z  INFO iroh_sdht: mDNS discovery enabled
+2024-12-02T10:05:00Z  INFO iroh_sdht: telemetry snapshot pressure="0.00" stored_keys=0 k=20 alpha=3
 ```
 
 ---
@@ -254,12 +270,14 @@ cargo test iterative_find_node
 ## Dependencies
 
 | Crate | Version | Purpose |
-|-------|---------|---------|
+|-------|---------|--------|
 | `iroh` | 0.95.1 | QUIC transport with discovery |
 | `irpc` / `irpc-iroh` | 0.11 | RPC framework |
 | `iroh-blake3` | 1.4 | BLAKE3 hashing |
 | `tokio` | 1.x | Async runtime |
 | `lru` | 0.12 | O(1) LRU cache |
+| `tracing` | 0.1 | Structured logging |
+| `tracing-subscriber` | 0.3 | Log output formatting |
 
 ---
 
